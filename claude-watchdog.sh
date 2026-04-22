@@ -96,11 +96,25 @@ MAX_LOG_BYTES=1048576
 
 CLAUDE_CMD="${WATCHDOG_CLAUDE_CMD:-export PATH=$PATH && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official --channels plugin:discord@claude-plugins-official}"
 
+HEARTBEAT_FILE="${WATCHDOG_HEARTBEAT_FILE:-}"
+HEARTBEAT_STALE_REQUESTED="${WATCHDOG_HEARTBEAT_STALE_SECONDS:-600}"
+# Safety floor: never trust a stale threshold tighter than ~2 launchd cycles
+# (assumes StartInterval=180). Users can always raise the threshold; floor
+# only kicks in when an unrealistically small value is set.
+HEARTBEAT_STALE_FLOOR=390
+if [ "$HEARTBEAT_STALE_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
+    HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_FLOOR
+else
+    HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_REQUESTED
+fi
+
 if [ "$SHOW_CONFIG" -eq 1 ]; then
     cat <<EOF
 WATCHDOG_VERSION=$WATCHDOG_VERSION
 WATCHDOG_SESSION=$TMUX_SESSION
 WATCHDOG_LOG_DIR=$LOG_DIR
+WATCHDOG_HEARTBEAT_FILE=${HEARTBEAT_FILE:-(disabled)}
+WATCHDOG_HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_SECONDS (requested=$HEARTBEAT_STALE_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
 WATCHDOG_COOLDOWN=$COOLDOWN_SECONDS
 WATCHDOG_PATH=$PATH
 WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
@@ -140,6 +154,31 @@ start_claude() {
     log "ACTION: Restart complete. Cooldown set."
 }
 
+# Echoes one of: disabled | fresh | stale
+# "disabled" = heartbeat signal unavailable for cross-check (env unset or file
+# not yet created by plugin). In that state, fall back to grep-only detection
+# (Phase 0 backward-compat path).
+heartbeat_state() {
+    if [ -z "$HEARTBEAT_FILE" ]; then
+        echo "disabled"
+        return
+    fi
+    if [ ! -f "$HEARTBEAT_FILE" ]; then
+        log "DEBUG: heartbeat file not found: $HEARTBEAT_FILE (plugin not installed?)"
+        echo "disabled"
+        return
+    fi
+    local hb_mtime now age
+    hb_mtime=$(stat -f%m "$HEARTBEAT_FILE" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    age=$(( now - hb_mtime ))
+    if [ "$age" -gt "$HEARTBEAT_STALE_SECONDS" ]; then
+        echo "stale"
+    else
+        echo "fresh"
+    fi
+}
+
 # --- Setup ---
 
 mkdir -p "$LOG_DIR"
@@ -174,12 +213,47 @@ if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     exit 0
 fi
 
-# Case B: tmux session exists — check for stuck state
+# Case B: tmux session exists — check for stuck state using heartbeat
+# (primary when enabled) and pane-scrape grep (cross-check / fallback).
 PANE_OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -50)
 
+GREP_MATCHED=0
+MATCHED=""
 if echo "$PANE_OUTPUT" | grep -qE "$PATTERN"; then
+    GREP_MATCHED=1
     MATCHED=$(echo "$PANE_OUTPUT" | grep -oE "$PATTERN" | head -1)
-    log "DETECT: Stuck state found: '$MATCHED'"
+fi
+
+HB_STATE=$(heartbeat_state)
+SHOULD_RESTART=0
+
+case "$HB_STATE:$GREP_MATCHED" in
+    stale:1)
+        log "DETECT: heartbeat stale AND pane pattern '$MATCHED' (signals agree)"
+        SHOULD_RESTART=1
+        ;;
+    stale:0)
+        log "WARN: heartbeat stale but no stuck pattern in pane; restarting (heartbeat authoritative)"
+        SHOULD_RESTART=1
+        ;;
+    fresh:1)
+        log "WARN: pane pattern '$MATCHED' matched but heartbeat fresh; restarting (grep authoritative — may be false positive from conversation content)"
+        SHOULD_RESTART=1
+        ;;
+    fresh:0)
+        : # both clean, fall through to Case C
+        ;;
+    disabled:1)
+        # Phase 0 backward-compat path: heartbeat unavailable, grep decides alone.
+        log "DETECT: Stuck state found: '$MATCHED'"
+        SHOULD_RESTART=1
+        ;;
+    disabled:0)
+        : # grep-only, clean, fall through to Case C
+        ;;
+esac
+
+if [ "$SHOULD_RESTART" -eq 1 ]; then
     if check_cooldown; then
         start_claude
     fi
