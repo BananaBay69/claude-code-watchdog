@@ -155,9 +155,16 @@ start_claude() {
 }
 
 # Echoes one of: disabled | fresh | stale
-# "disabled" = heartbeat signal unavailable for cross-check (env unset or file
-# not yet created by plugin). In that state, fall back to grep-only detection
-# (Phase 0 backward-compat path).
+#
+# File format (v1): a single line "SCHEMA_VERSION TIMESTAMP" where
+# SCHEMA_VERSION is "1" and TIMESTAMP is a unix epoch integer. Example:
+#
+#     1 1745382601
+#
+# Unknown schemas or malformed content are treated as stale so that a
+# misbehaving writer still triggers the supervisor (fail loud, not silent).
+# "disabled" is reserved for "no signal available" — env unset or file
+# missing — where the supervisor falls back to grep-only detection.
 heartbeat_state() {
     if [ -z "$HEARTBEAT_FILE" ]; then
         echo "disabled"
@@ -168,10 +175,23 @@ heartbeat_state() {
         echo "disabled"
         return
     fi
-    local hb_mtime now age
-    hb_mtime=$(stat -f%m "$HEARTBEAT_FILE" 2>/dev/null || echo 0)
+    local schema hb_ts now age
+    schema=""
+    hb_ts=""
+    # shellcheck disable=SC2162
+    read schema hb_ts _rest < "$HEARTBEAT_FILE" 2>/dev/null || true
+    if [ "$schema" != "1" ]; then
+        log "WARN: heartbeat unsupported schema '$schema' in $HEARTBEAT_FILE — treating as stale"
+        echo "stale"
+        return
+    fi
+    if ! [[ "$hb_ts" =~ ^[0-9]+$ ]]; then
+        log "WARN: heartbeat malformed timestamp '$hb_ts' in $HEARTBEAT_FILE — treating as stale"
+        echo "stale"
+        return
+    fi
     now=$(date +%s)
-    age=$(( now - hb_mtime ))
+    age=$(( now - hb_ts ))
     if [ "$age" -gt "$HEARTBEAT_STALE_SECONDS" ]; then
         echo "stale"
     else
