@@ -30,6 +30,12 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>__HOME__</string>
+        <key>WATCHDOG_LOG_DIR</key>
+        <string>__LOG_DIR__</string>
+        <key>WATCHDOG_SESSION</key>
+        <string>__WATCHDOG_SESSION__</string>
+        <key>WATCHDOG_HEARTBEAT_FILE</key>
+        <string>__HEARTBEAT_FILE__</string>
     </dict>
 </dict>
 </plist>
