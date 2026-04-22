@@ -12,9 +12,12 @@
 set -euo pipefail
 
 # --- Installer defaults ---
+# New-install defaults use the upstream-recommended ~/.claude/watchdog layout.
+# Legacy deployments (e.g. pre-v0.1 installs) should pass --log-dir and
+# --heartbeat-file explicitly to preserve their existing paths.
 INSTALL_DIR="$HOME/bin"
-LOG_DIR="$HOME/.openclaw/logs"
-HEARTBEAT_FILE=""
+LOG_DIR="$HOME/.claude/watchdog/logs"
+HEARTBEAT_FILE="$HOME/.claude/watchdog/heartbeat"
 SESSION="claude"
 CLAUDE_CMD=""
 
@@ -30,20 +33,19 @@ Usage:
     bash install.sh [options]
 
 Options:
-    --log-dir <path>         log directory (default: $HOME/.openclaw/logs)
-    --heartbeat-file <path>  heartbeat file for liveness signal
-                             (default: disabled; enable for use with Phase 2 plugin)
+    --log-dir <path>         log directory (default: $HOME/.claude/watchdog/logs)
+    --heartbeat-file <path>  heartbeat file (default: $HOME/.claude/watchdog/heartbeat;
+                             pass empty string to disable)
     --session <name>         tmux session name to supervise (default: claude)
     --claude-cmd "<cmd>"     override the default claude command
     --help, -h               show this message
 
-Legacy-layout install (existing Mac Mini deployments):
+Recommended new install (defaults):
+    bash install.sh
+
+Legacy-layout install (pre-v0.1 deployments preserving ~/.openclaw paths):
     bash install.sh --log-dir "$HOME/.openclaw/logs" \
                     --heartbeat-file "$HOME/.openclaw/heartbeat"
-
-Recommended new install:
-    bash install.sh --log-dir "$HOME/.claude/watchdog/logs" \
-                    --heartbeat-file "$HOME/.claude/watchdog/heartbeat"
 USAGE
 }
 

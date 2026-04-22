@@ -30,7 +30,8 @@ Usage:
 Environment variables (all optional):
     WATCHDOG_SESSION                      tmux session name (default: claude)
     WATCHDOG_LOG_DIR                      log directory (default: $HOME/.claude/watchdog/logs)
-    WATCHDOG_HEARTBEAT_FILE               heartbeat file path (default: $HOME/.claude/watchdog/heartbeat; unset = disabled)
+    WATCHDOG_HEARTBEAT_FILE               heartbeat file path (unset = disabled;
+                                          installer default: $HOME/.claude/watchdog/heartbeat)
     WATCHDOG_HEARTBEAT_STALE_SECONDS      stale threshold in seconds (default: 600)
     WATCHDOG_COOLDOWN                     min seconds between restarts (default: 300)
     WATCHDOG_PATH                         PATH override for subprocesses
@@ -88,7 +89,7 @@ fi
 export PATH="${WATCHDOG_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 TMUX_SESSION="${WATCHDOG_SESSION:-claude}"
-LOG_DIR="${WATCHDOG_LOG_DIR:-$HOME/.openclaw/logs}"
+LOG_DIR="${WATCHDOG_LOG_DIR:-$HOME/.claude/watchdog/logs}"
 LOG_FILE="$LOG_DIR/claude-watchdog.log"
 COOLDOWN_FILE="$LOG_DIR/.watchdog-last-restart"
 COOLDOWN_SECONDS="${WATCHDOG_COOLDOWN:-300}"
