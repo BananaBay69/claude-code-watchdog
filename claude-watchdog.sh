@@ -1,12 +1,89 @@
 #!/bin/bash
 # Claude Code Watchdog — detects stuck sessions and restarts
-# https://github.com/PsychQuant/claude-code-watchdog
+# https://github.com/BananaBay69/claude-code-watchdog
 
 set -euo pipefail
 
+WATCHDOG_VERSION="0.1.0-dev"
+
+# --- CLI flag parsing ---
+# No args => daemon mode (launchd entrypoint, unchanged behavior).
+# Flags are handled before config evaluation where possible, so --help
+# and --version work even if HOME is unset.
+
+SHOW_CONFIG=0
+CONFIG_FILE=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            cat <<'USAGE'
+claude-watchdog — supervise a Claude Code tmux session and restart on stuck states
+
+Usage:
+    claude-watchdog.sh                    Run one supervisory check (launchd entrypoint)
+    claude-watchdog.sh --help             Show this help
+    claude-watchdog.sh --version          Print version
+    claude-watchdog.sh --show-config      Dump effective config and exit
+    claude-watchdog.sh --config <file>    Source experimental config file then exit 0
+
+Environment variables (all optional):
+    WATCHDOG_SESSION                      tmux session name (default: claude)
+    WATCHDOG_LOG_DIR                      log directory (default: $HOME/.claude/watchdog/logs)
+    WATCHDOG_HEARTBEAT_FILE               heartbeat file path (default: $HOME/.claude/watchdog/heartbeat; unset = disabled)
+    WATCHDOG_HEARTBEAT_STALE_SECONDS      stale threshold in seconds (default: 600)
+    WATCHDOG_COOLDOWN                     min seconds between restarts (default: 300)
+    WATCHDOG_PATH                         PATH override for subprocesses
+    WATCHDOG_CLAUDE_CMD                   command used to (re)start Claude in tmux
+
+Detection order:
+    A. tmux session missing             -> restart
+    B. heartbeat stale OR grep matched  -> restart (WARN on disagreement)
+    C. claude process dead in pane      -> restart
+
+Backward compatibility: existing installs on pre-v0.1 layouts are supported via
+install.sh --log-dir / --heartbeat-file / --session flags. See CONTRIBUTING.md.
+USAGE
+            exit 0
+            ;;
+        -V|--version)
+            echo "$WATCHDOG_VERSION"
+            exit 0
+            ;;
+        --show-config)
+            SHOW_CONFIG=1
+            shift
+            ;;
+        --config)
+            if [ "$#" -lt 2 ]; then
+                echo "error: --config requires a file path" >&2
+                exit 2
+            fi
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "error: unknown argument '$1' (try --help)" >&2
+            exit 2
+            ;;
+    esac
+done
+
 # --- Configuration ---
-# Override these via environment variables if needed:
-#   WATCHDOG_SESSION=claude WATCHDOG_COOLDOWN=300 claude-watchdog.sh
+# Override via environment variables or the experimental --config <file> flag.
+
+if [ -n "$CONFIG_FILE" ]; then
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "error: --config file not found: $CONFIG_FILE" >&2
+        exit 2
+    fi
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
 
 export PATH="${WATCHDOG_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
@@ -18,6 +95,20 @@ COOLDOWN_SECONDS="${WATCHDOG_COOLDOWN:-300}"
 MAX_LOG_BYTES=1048576
 
 CLAUDE_CMD="${WATCHDOG_CLAUDE_CMD:-export PATH=$PATH && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official --channels plugin:discord@claude-plugins-official}"
+
+if [ "$SHOW_CONFIG" -eq 1 ]; then
+    cat <<EOF
+WATCHDOG_VERSION=$WATCHDOG_VERSION
+WATCHDOG_SESSION=$TMUX_SESSION
+WATCHDOG_LOG_DIR=$LOG_DIR
+WATCHDOG_COOLDOWN=$COOLDOWN_SECONDS
+WATCHDOG_PATH=$PATH
+WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
+LOG_FILE=$LOG_FILE
+COOLDOWN_FILE=$COOLDOWN_FILE
+EOF
+    exit 0
+fi
 
 # --- Helpers ---
 
