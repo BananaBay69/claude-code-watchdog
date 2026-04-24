@@ -23,7 +23,7 @@ CLAUDE_CMD=""
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_NAME="com.openclaw.claude-watchdog"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 
 usage() {
     cat <<'USAGE'
@@ -69,6 +69,28 @@ echo "  Log dir:        $LOG_DIR"
 echo "  Heartbeat file: ${HEARTBEAT_FILE:-(disabled)}"
 echo "  Session:        $SESSION"
 echo ""
+
+# Remote-install support — if install.sh is invoked via `curl | bash`, the
+# artifacts (claude-watchdog.sh, plist template) aren't on disk next to the
+# script. Fetch them into a temp dir and rebase SCRIPT_DIR so later copy/sed
+# steps find them. Runs after arg parsing so --help/--version don't trigger it.
+REMOTE_RAW="https://raw.githubusercontent.com/BananaBay69/claude-code-watchdog/main"
+if [ -z "$SCRIPT_DIR" ] \
+    || [ ! -f "$SCRIPT_DIR/claude-watchdog.sh" ] \
+    || [ ! -f "$SCRIPT_DIR/com.openclaw.claude-watchdog.plist" ]; then
+    FETCH_TMP=$(mktemp -d)
+    trap 'rm -rf "$FETCH_TMP"' EXIT
+    echo "[0/5] Fetching artifacts from $REMOTE_RAW..."
+    curl -fsSL --max-time 30 "$REMOTE_RAW/claude-watchdog.sh" \
+        -o "$FETCH_TMP/claude-watchdog.sh" || {
+        echo "error: failed to fetch claude-watchdog.sh" >&2; exit 1;
+    }
+    curl -fsSL --max-time 30 "$REMOTE_RAW/com.openclaw.claude-watchdog.plist" \
+        -o "$FETCH_TMP/com.openclaw.claude-watchdog.plist" || {
+        echo "error: failed to fetch plist template" >&2; exit 1;
+    }
+    SCRIPT_DIR="$FETCH_TMP"
+fi
 
 # 1. Create directories
 echo "[1/5] Creating directories..."
