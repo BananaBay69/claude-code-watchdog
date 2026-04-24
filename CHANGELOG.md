@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.4 — 2026-04-24
+
+### Fixed
+- `start_claude()` now pins the tmux session's working directory to `$HOME`
+  via `tmux new-session -c "$HOME"`. Fresh installs driven by launchd
+  previously inherited launchd's default cwd `/`, causing Claude Code to
+  treat `/` as the workspace and block on the "Yes, I trust this folder"
+  prompt — a dialog `--dangerously-skip-permissions` does **not** bypass in
+  Claude Code v2.1.x. The result was an infinite kill+restart loop bounded
+  only by the 5-minute cooldown. Fixes #10.
+
 ## v0.1.3 — 2026-04-24
 
 ### Fixed

@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.3"
+WATCHDOG_VERSION="0.1.4"
 
 # --- CLI flag parsing ---
 # No args => daemon mode (launchd entrypoint, unchanged behavior).
@@ -150,7 +150,10 @@ start_claude() {
     tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     sleep 2
     log "ACTION: Starting new tmux session '$TMUX_SESSION'"
-    tmux new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
+    # Pin session cwd to $HOME so Claude never inherits launchd's default `/`
+    # (workspace `/` triggers a trust prompt that --dangerously-skip-permissions
+    # does not bypass in Claude Code v2.1.x, causing infinite restart loops — #10).
+    tmux new-session -d -s "$TMUX_SESSION" -c "$HOME" "$CLAUDE_CMD"
     date +%s > "$COOLDOWN_FILE"
     log "ACTION: Restart complete. Cooldown set."
 }
