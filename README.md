@@ -162,6 +162,22 @@ A single line: `SCHEMA_VERSION TIMESTAMP`
 - File present and parseable, age ≤ threshold → `heartbeat: fresh`.
 - File present and parseable, age > threshold → `heartbeat: stale`.
 
+### Sidecar config (v0.1.1+)
+
+`install.sh` writes `~/.claude/watchdog/config.env` containing
+`WATCHDOG_HEARTBEAT_FILE=<path>`. This allows cross-process consumers
+(notably the `bananabay-watchdog` Claude Code plugin) to discover the
+custom heartbeat path without reading the launchd plist.
+
+Readers should source the file conditionally:
+
+```bash
+[ -f "$HOME/.claude/watchdog/config.env" ] && . "$HOME/.claude/watchdog/config.env"
+F="${WATCHDOG_HEARTBEAT_FILE:-$HOME/.claude/watchdog/heartbeat}"
+```
+
+The file is removed by `uninstall.sh`.
+
 ## Configuration
 
 All settings can be overridden via environment variables (the installer writes them into the plist's `EnvironmentVariables` block):

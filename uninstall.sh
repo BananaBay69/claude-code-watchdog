@@ -9,14 +9,17 @@ PLIST_NAME="com.openclaw.claude-watchdog"
 echo "=== Claude Code Watchdog Uninstaller ==="
 echo ""
 
-echo "[1/3] Unloading launchd agent..."
+echo "[1/4] Unloading launchd agent..."
 launchctl unload "$PLIST_DIR/$PLIST_NAME.plist" 2>/dev/null || true
 
-echo "[2/3] Removing files..."
+echo "[2/4] Removing files..."
 rm -f "$INSTALL_DIR/claude-watchdog.sh"
 rm -f "$PLIST_DIR/$PLIST_NAME.plist"
 
-echo "[3/3] Done."
+echo "[3/4] Removing sidecar config..."
+rm -f "$HOME/.claude/watchdog/config.env"
+
+echo "[4/4] Done."
 echo ""
 echo "  Log files preserved at the directory configured during install."
 echo "  Common locations to check:"
