@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.3 — 2026-04-24
+
+### Fixed
+- Script version string bumped to `0.1.3` (was left at `0.1.1` when v0.1.2
+  shipped — the v0.1.2 release contained the install.sh remote-fetch fix but
+  missed the corresponding `WATCHDOG_VERSION` bump, so `--version` would
+  report `0.1.1` on v0.1.2 installs, confusing the `bananabay-watchdog`
+  plugin's update detection). Reporting is now consistent with tag.
+
 ## v0.1.2 — 2026-04-24
 
 ### Fixed
