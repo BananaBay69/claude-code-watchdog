@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.0"
+WATCHDOG_VERSION="0.1.1"
 
 # --- CLI flag parsing ---
 # No args => daemon mode (launchd entrypoint, unchanged behavior).
