@@ -264,8 +264,8 @@ detect_restart_pattern() {
     local pane="$1"
     local pat
     pat=$(IFS='|'; echo "${RESTART_PATTERNS[*]}")
-    if echo "$pane" | grep -qE "$pat"; then
-        echo "yes:$(echo "$pane" | grep -oE "$pat" | head -1)"
+    if echo "$pane" | grep -qE -- "$pat"; then
+        echo "yes:$(echo "$pane" | grep -oE -- "$pat" | head -1)"
     else
         echo "no:"
     fi
