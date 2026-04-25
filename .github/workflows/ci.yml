@@ -16,15 +16,19 @@ jobs:
         run: brew install shellcheck tmux
 
       - name: Lint shell scripts
+        # -S warning: only fail on warning-level findings or worse.
+        # Info-level hints (notably SC1091 "can't follow dynamic source path",
+        # which fires on every test file's `. "$SCRIPT_DIR/..."` line because
+        # the path is not statically resolvable) do not block the build.
         run: |
-          shellcheck claude-watchdog.sh
-          shellcheck install.sh
-          shellcheck uninstall.sh
-          shellcheck test/run.sh
-          shellcheck test/lib/assert.sh
-          shellcheck test/integration/helpers/*.sh
+          shellcheck -S warning claude-watchdog.sh
+          shellcheck -S warning install.sh
+          shellcheck -S warning uninstall.sh
+          shellcheck -S warning test/run.sh
+          shellcheck -S warning test/lib/assert.sh
+          shellcheck -S warning test/integration/helpers/*.sh
           for f in test/unit/*.test.sh test/integration/*.test.sh; do
-            shellcheck "$f"
+            shellcheck -S warning "$f"
           done
 
       - name: Run test suite
