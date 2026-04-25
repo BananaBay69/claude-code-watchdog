@@ -242,6 +242,48 @@ heartbeat_state() {
     fi
 }
 
+# Echoes one of: disabled | fresh | stale
+#
+# Same v1 schema as heartbeat: "1 <unix_ts>". Read by Case D (silent-loop)
+# to determine whether the bot has produced an outbound reply within the
+# configured window.
+#
+# "disabled" reserved for "no signal available" — env unset or file missing —
+# in which case Case D is skipped (cannot determine silent-loop without
+# outbound signal).
+outbound_state() {
+    if [ -z "$OUTBOUND_FILE" ]; then
+        echo "disabled"
+        return
+    fi
+    if [ ! -f "$OUTBOUND_FILE" ]; then
+        echo "disabled"
+        return
+    fi
+    local schema ob_ts now age
+    schema=""
+    ob_ts=""
+    # shellcheck disable=SC2162
+    read schema ob_ts _rest < "$OUTBOUND_FILE" 2>/dev/null || true
+    if [ "$schema" != "1" ]; then
+        log "WARN: outbound unsupported schema '$schema' in $OUTBOUND_FILE — treating as stale"
+        echo "stale"
+        return
+    fi
+    if ! [[ "$ob_ts" =~ ^[0-9]+$ ]]; then
+        log "WARN: outbound malformed timestamp '$ob_ts' in $OUTBOUND_FILE — treating as stale"
+        echo "stale"
+        return
+    fi
+    now=$(date +%s)
+    age=$(( now - ob_ts ))
+    if [ "$age" -gt "$SILENT_LOOP_OUTBOUND_STALE_SECONDS" ]; then
+        echo "stale"
+    else
+        echo "fresh"
+    fi
+}
+
 # --- Alert state helpers ---
 #
 # Alert flag files live in $LOG_DIR alongside .watchdog-last-restart.
