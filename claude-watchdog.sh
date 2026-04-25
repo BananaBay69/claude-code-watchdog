@@ -287,8 +287,8 @@ detect_terminal_state() {
         echo "no:"
         return
     fi
-    if echo "$pane" | grep -qE "$pat"; then
-        echo "yes:$(echo "$pane" | grep -oE "$pat" | head -1)"
+    if echo "$pane" | grep -qE -- "$pat"; then
+        echo "yes:$(echo "$pane" | grep -oE -- "$pat" | head -1)"
     else
         echo "no:"
     fi
@@ -319,7 +319,11 @@ RESTART_PATTERNS=(
 
 # TERMINAL_PATTERNS: pane content that indicates an unrecoverable state where
 # restart cannot help (e.g. OAuth invalidated). Populated in v0.1.6 Task 4.
-TERMINAL_PATTERNS=()
+TERMINAL_PATTERNS=(
+    "--channels ignored"
+    "Channels require claude.ai authentication"
+    "Not logged in"
+)
 
 # --- Main ---
 
@@ -378,6 +382,27 @@ EOF
     else
         GREP_MATCHED=0
         MATCHED=""
+    fi
+
+    # Terminal-state branch: orthogonal to restart logic. If we detect a
+    # state restart cannot recover from (e.g. Not logged in), emit a
+    # one-shot alert and let the user fix it manually. Dedup via flag file
+    # that's cleared when the symptom disappears.
+    TERMINAL_MATCH=$(detect_terminal_state "$PANE_OUTPUT")
+    if [ "${TERMINAL_MATCH%%:*}" = "yes" ]; then
+        if ! alert_already_sent not-logged-in; then
+            local terminal_msg
+            terminal_msg="Claude Code is not logged in (TUI shows: ${TERMINAL_MATCH#*:}). Restart cannot fix — needs interactive /login. Recovery: ssh into host, tmux attach -t $TMUX_SESSION, then run /login."
+            emit_alert not-logged-in "$terminal_msg"
+            mark_alert_sent not-logged-in
+        else
+            log "INFO: terminal-state '${TERMINAL_MATCH#*:}' still present (alert already sent — silent until cleared)"
+        fi
+    else
+        if alert_already_sent not-logged-in; then
+            log "INFO: terminal-state cleared — removing alert flag"
+            clear_alert_flag not-logged-in
+        fi
     fi
 
     HB_STATE=$(heartbeat_state)
