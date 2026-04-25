@@ -747,7 +747,38 @@ EOF
         exit 0
     fi
 
-    log "OK: Session alive, no stuck patterns detected"
+    # Case D: silent-loop (opt-in via WATCHDOG_SILENT_LOOP_ENABLED=1)
+    # Distinguishes (a) genuinely idle bot from (b) bot consuming inputs but
+    # not producing outbound replies. Alert only — never restart (root cause
+    # is typically SKILL.md instruction-leak which restart cannot fix).
+    INCOMING_COUNT=$(count_pane_incoming "$PANE_OUTPUT")
+    OB_STATE=$(outbound_state)
+    SILENT_RESULT=$(detect_silent_loop "$INCOMING_COUNT" "$OB_STATE")
+    if [ "${SILENT_RESULT%%:*}" = "yes" ]; then
+        if ! alert_already_sent silent-loop; then
+            local silent_msg
+            silent_msg="Silent loop detected: ${SILENT_RESULT#*:}. Bot pane shows incoming channel messages but no outbound reply within ${SILENT_LOOP_OUTBOUND_STALE_SECONDS}s. Restart will NOT fix (root cause typically SKILL.md instruction-leak). Recovery: ssh into host, tmux capture-pane -t $TMUX_SESSION, inspect skill behavior."
+            emit_alert silent-loop "$silent_msg"
+            mark_alert_sent silent-loop
+        else
+            log "INFO: silent-loop still present (${SILENT_RESULT#*:}, alert already sent — silent until cleared)"
+        fi
+    else
+        if alert_already_sent silent-loop; then
+            log "INFO: silent-loop cleared (${SILENT_RESULT#*:}) — removing alert flag"
+            clear_alert_flag silent-loop
+        fi
+        # Only log the no-detection state when enabled (avoid log spam when default-disabled)
+        if [ "$SILENT_LOOP_ENABLED" -eq 1 ]; then
+            log "INFO: silent-loop check: ${SILENT_RESULT#*:}"
+        fi
+    fi
+
+    if [ "$SILENT_LOOP_ENABLED" -eq 1 ]; then
+        log "OK: Session alive, no stuck patterns detected (silent-loop: ${SILENT_RESULT##*:})"
+    else
+        log "OK: Session alive, no stuck patterns detected"
+    fi
     exit 0
 }
 
