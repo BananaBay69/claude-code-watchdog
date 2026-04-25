@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.1.5 — 2026-04-25
+
+### Changed
+- Heartbeat-stale-alone no longer triggers restart. Bots that go idle for
+  longer than `WATCHDOG_HEARTBEAT_STALE_SECONDS` (default 600s) without
+  receiving a Telegram/Discord message produce a stale heartbeat naturally —
+  the v0.1.0 behavior of `heartbeat authoritative` killed healthy idle bots
+  every 6 minutes (cooldown-bounded). Heartbeat is now treated as a positive
+  signal: stale + grep clean falls through to the process-alive check (Case
+  C) instead of restarting. Fully agreed signals (stale + grep match) still
+  restart.
+
+### Note for plugin authors
+- The `bananabay-watchdog` plugin's hooks fire only on `UserPromptSubmit` and
+  `Stop` events. There's no continuous heartbeat. v0.1.5 accepts this as the
+  contract; future plugins may add a background writer if "plugin alive but
+  bot idle" detection becomes important.
+
 ## v0.1.4 — 2026-04-24
 
 ### Fixed

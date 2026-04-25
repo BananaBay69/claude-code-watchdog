@@ -17,7 +17,7 @@ launchd (every 3 min)
       ├─ No → start Claude
     → heartbeat + pane-grep check                   (Case B)
       ├─ heartbeat stale AND grep matched → restart (signals agree)
-      ├─ heartbeat stale, grep clean      → restart (WARN, heartbeat authoritative)
+      ├─ heartbeat stale, grep clean      → INFO log only, defer to Case C (idle bots produce stale heartbeats too — see v0.1.5)
       ├─ heartbeat fresh, grep matched    → restart (WARN, grep authoritative)
       ├─ both clean                       → continue to Case C
     → claude process alive in pane?                 (Case C)

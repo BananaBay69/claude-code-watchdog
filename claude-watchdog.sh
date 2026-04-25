@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.4"
+WATCHDOG_VERSION="0.1.5"
 
 # --- CLI flag parsing ---
 # No args => daemon mode (launchd entrypoint, unchanged behavior).
@@ -257,8 +257,12 @@ case "$HB_STATE:$GREP_MATCHED" in
         SHOULD_RESTART=1
         ;;
     stale:0)
-        log "WARN: heartbeat stale but no stuck pattern in pane; restarting (heartbeat authoritative)"
-        SHOULD_RESTART=1
+        # v0.1.5: do NOT restart on heartbeat-stale-alone. Idle bots that
+        # haven't received a UserPromptSubmit/Stop event in `WATCHDOG_HEARTBEAT_STALE_SECONDS`
+        # produce a stale heartbeat naturally — restarting them was a false
+        # positive. Fall through to Case C (process-alive check) which catches
+        # the actually-stuck-without-pattern scenario.
+        log "INFO: heartbeat stale but pane clean — likely idle; deferring to process check"
         ;;
     fresh:1)
         log "WARN: pane pattern '$MATCHED' matched but heartbeat fresh; restarting (grep authoritative — may be false positive from conversation content)"
