@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.5"
+WATCHDOG_VERSION="0.1.6"
 
 # --- CLI flag parsing ---
 # parse_args() handles --help / --version / --show-config / --config <file>.

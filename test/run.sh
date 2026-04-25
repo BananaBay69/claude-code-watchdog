@@ -5,7 +5,7 @@
 # Usage: bash test/run.sh
 set +e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 PASS=0
 FAIL=0
@@ -19,7 +19,7 @@ for test_file in unit/*.test.sh integration/*.test.sh; do
         PASS=$((PASS + 1))
     else
         echo "FAIL"
-        echo "$output" | sed 's/^/      /'
+        printf '%s\n' "$output" | while IFS= read -r line; do printf '      %s\n' "$line"; done
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$test_file")
     fi

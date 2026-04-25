@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.1.6 — 2026-04-25
+
+### Added
+- **Daily restart cap (`#12`)**. New env var `WATCHDOG_DAILY_RESTART_CAP`
+  (default 10) bounds the total kill+restart cycles per local day. After
+  the cap is reached, cooldown extends from `WATCHDOG_COOLDOWN` (default
+  300s) to `WATCHDOG_THROTTLED_COOLDOWN` (default 3600s) for the rest
+  of the day. A one-shot `cap-reached` alert fires the moment the cap
+  is hit. Set `WATCHDOG_DAILY_RESTART_CAP=0` to disable (legacy unbounded
+  behavior).
+- **Terminal-state detection (`#13`)**. New `TERMINAL_PATTERNS` array
+  recognizes states restart cannot recover from:
+  - `--channels ignored`
+  - `Channels require claude.ai authentication`
+  - `Not logged in`
+  When matched, watchdog emits a `not-logged-in` alert (no restart)
+  with recovery instructions. State-based dedup: alert fires once per
+  state-entry, suppresses while symptom persists, re-fires after recovery
+  + re-entry.
+- **Pluggable alert hook**. `WATCHDOG_ALERT_CMD` env var: shell expression
+  invoked on alerts. Receives `WATCHDOG_ALERT_TYPE` and `WATCHDOG_ALERT_MSG`
+  env vars. Unset = log-only (`ALERT [<type>]: <msg>` line in
+  `claude-watchdog.log`).
+- **CLI flags**:
+  - `--reset` clears today's counter + both alert flags (use after
+    manual recovery to restore normal cooldown without waiting for
+    midnight).
+  - `--status` dumps version, count vs cap, effective cooldown, last
+    restart age, next restart allowed in, and both flag states.
+- **Test harness** under `test/`:
+  - Unit tests source the script (via new source-guard) and call helpers
+    directly.
+  - Integration tests run the script as a subprocess with mocked
+    `tmux`/`pgrep` in PATH; observe state files, log lines, and tmux
+    call traces.
+  - `test/run.sh` discovers and runs all `*.test.sh` files.
+- **CI** (`.github/workflows/ci.yml`): shellcheck + test suite on
+  macos-latest for push and PR.
+
+### Changed
+- `claude-watchdog.sh` main flow is now wrapped in `main()` with a
+  source-guard at the bottom, enabling unit tests. Daemon-mode behavior
+  is unchanged.
+- `STUCK_PATTERNS` renamed to `RESTART_PATTERNS` (semantically clearer
+  paired with new `TERMINAL_PATTERNS`); `detect_restart_pattern` and
+  `detect_terminal_state` helpers extracted from the inline pane scan.
+- `check_cooldown` now accepts the cooldown duration as `$1` (default
+  `$COOLDOWN_SECONDS` preserves backward-compat for any in-script callers).
+
+### Backward compatibility
+- All existing env vars and CLI flags continue to work unchanged.
+- Plist Label `com.openclaw.claude-watchdog` unchanged.
+- v0.1.5 → v0.1.6 upgrade gains `WATCHDOG_DAILY_RESTART_CAP=10` by
+  default. Healthy bots (0–3 restarts/day) won't notice. Users who want
+  the legacy unbounded behavior: set `WATCHDOG_DAILY_RESTART_CAP=0`.
+
+### Note for downstream installs
+- Configure `WATCHDOG_ALERT_CMD` to a script of your choosing (e.g.
+  `osascript` for macOS notifications, `curl` to a Telegram bot, ntfy,
+  etc.) to receive alerts. Without it, alerts are visible only as
+  `ALERT:` lines in `claude-watchdog.log`. See README "Alert protocol"
+  section for the calling convention.
+
 ## v0.1.5 — 2026-04-25
 
 ### Changed
