@@ -27,9 +27,9 @@ assert_file_missing "$LOG_DIR/.watchdog-alert-sent-not-logged-in" "terminal flag
 assert_file_exists "$LOG_DIR/.watchdog-last-restart" "cooldown marker preserved"
 
 # Run --reset on already-clean dir — should not error
-WATCHDOG_LOG_DIR="$LOG_DIR" \
-WATCHDOG_HEARTBEAT_FILE="" \
-output=$(bash "$ROOT/claude-watchdog.sh" --reset)
+# shellcheck disable=SC2034
+WATCHDOG_LOG_DIR="$LOG_DIR" WATCHDOG_HEARTBEAT_FILE="" \
+    output=$(bash "$ROOT/claude-watchdog.sh" --reset)
 
 if ! echo "$output" | grep -q "no state files to remove"; then
     echo "FAIL: idempotent --reset should report 'no state files to remove'" >&2

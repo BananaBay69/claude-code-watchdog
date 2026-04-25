@@ -82,6 +82,32 @@ These are **public interfaces** and won't change without a major version bump:
 - Exit code 0 = daemon success (launchd depends on this)
 - Cooldown file format: single line, unix timestamp
 
+## v0.1.6 additions to the backward-compat contract
+
+These public interfaces are stabilized as of v0.1.6 and won't change without a major version bump:
+
+- Env vars: `WATCHDOG_DAILY_RESTART_CAP`, `WATCHDOG_THROTTLED_COOLDOWN`, `WATCHDOG_ALERT_CMD`.
+- CLI flags: `--reset`, `--status`.
+- Alert protocol: `WATCHDOG_ALERT_TYPE` and `WATCHDOG_ALERT_MSG` env vars; type strings `cap-reached` and `not-logged-in`. Future types may be added (additive); readers should treat unknown types as `info`-level.
+- State file paths under `$LOG_DIR/`:
+  - `.watchdog-restart-count-YYYYMMDD`
+  - `.watchdog-alert-sent-cap-YYYYMMDD`
+  - `.watchdog-alert-sent-not-logged-in`
+
+## CI requirement (v0.1.6+)
+
+PRs must pass `.github/workflows/ci.yml` (shellcheck + `bash test/run.sh` on macos-latest) before merge. To run locally:
+
+```bash
+shellcheck claude-watchdog.sh install.sh uninstall.sh \
+           test/run.sh test/lib/assert.sh \
+           test/integration/helpers/*.sh \
+           test/unit/*.test.sh test/integration/*.test.sh
+bash test/run.sh
+```
+
+Both should report clean / all-pass before opening a PR.
+
 ## Not in scope (tracked separately)
 
 - **Phase 2**: Claude Code plugin with `UserPromptSubmit`/`Stop` heartbeat hooks

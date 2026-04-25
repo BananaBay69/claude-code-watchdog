@@ -191,6 +191,140 @@ All settings can be overridden via environment variables (the installer writes t
 | `WATCHDOG_COOLDOWN` | `300` | Minimum seconds between restarts |
 | `WATCHDOG_CLAUDE_CMD` | *(see above)* | Full Claude launch command |
 | `WATCHDOG_PATH` | `/opt/homebrew/bin:...` | PATH for subprocesses |
+| `WATCHDOG_DAILY_RESTART_CAP` | `10` | Daily restart cap; `0` = disabled |
+| `WATCHDOG_THROTTLED_COOLDOWN` | `3600` | Cooldown after cap (subject to safety floor) |
+| `WATCHDOG_ALERT_CMD` | *(unset)* | Shell expression invoked on alerts (see "Alert protocol") |
+
+## Restart cap (v0.1.6+)
+
+Watchdog tracks `kill+restart` cycles per local day. When the count
+reaches `WATCHDOG_DAILY_RESTART_CAP` (default 10), the cooldown extends
+from `WATCHDOG_COOLDOWN` (default 300s) to `WATCHDOG_THROTTLED_COOLDOWN`
+(default 3600s) for the rest of the day, and a one-shot `cap-reached`
+alert fires.
+
+This bounds damage when the underlying issue is unrecoverable by restart
+alone (e.g. corrupted credentials, network partition, upstream API
+breakage). Healthy bots restart 0–3 times per day and never approach
+the cap.
+
+State files (under `$LOG_DIR`):
+
+| File | Contents |
+|------|----------|
+| `.watchdog-restart-count-YYYYMMDD` | integer counter for today |
+| `.watchdog-alert-sent-cap-YYYYMMDD` | empty flag — exists once cap-reached has been alerted today |
+
+Counter rolls over at local midnight (filename change). Old files are
+tiny and self-rotate; no GC needed.
+
+To disable: set `WATCHDOG_DAILY_RESTART_CAP=0` (legacy unbounded behavior).
+
+To recover after manual fix without waiting for midnight: `claude-watchdog --reset`.
+
+## Terminal-state detection (v0.1.6+)
+
+Some Claude Code states cannot be recovered by restart — most notably
+"not logged in" after the OAuth session is invalidated. Each fresh
+session reads the same broken keychain.
+
+Watchdog detects these via `TERMINAL_PATTERNS`:
+
+| Pattern | Scenario |
+|---------|----------|
+| `--channels ignored` | Channels disabled because auth invalid |
+| `Channels require claude.ai authentication` | Same as above, alternate phrasing |
+| `Not logged in` | Generic logged-out state |
+
+When matched, watchdog **does NOT restart** — restart cannot help.
+Instead it emits a one-shot `not-logged-in` alert with recovery
+instructions (`ssh` + `tmux attach` + `/login`). The flag clears
+when the symptom disappears, so future re-entry triggers a fresh alert.
+
+State file: `$LOG_DIR/.watchdog-alert-sent-not-logged-in` (no date
+suffix — state-based, not time-based).
+
+## Alert protocol (v0.1.6+)
+
+Alerts are pluggable via the `WATCHDOG_ALERT_CMD` env var:
+
+```bash
+WATCHDOG_ALERT_CMD='/path/to/your/alert-handler.sh'
+# or inline:
+WATCHDOG_ALERT_CMD='osascript -e "display notification \"$WATCHDOG_ALERT_MSG\" with title \"watchdog\""'
+```
+
+When watchdog has an alert to deliver, it invokes:
+
+```bash
+WATCHDOG_ALERT_TYPE="<type>" WATCHDOG_ALERT_MSG="<message>" sh -c "$WATCHDOG_ALERT_CMD"
+```
+
+Your handler reads those env vars. Available types in v0.1.6:
+
+| `WATCHDOG_ALERT_TYPE` | When |
+|----------------------|------|
+| `cap-reached` | Daily restart cap was just hit |
+| `not-logged-in` | Terminal-state pattern matched (auth needed) |
+
+If `WATCHDOG_ALERT_CMD` is unset, alerts still appear in
+`claude-watchdog.log` as `ALERT [<type>]: <msg>` lines but no external
+notification fires. If your command exits non-zero, the watchdog logs
+a `WARN` and continues — alert delivery is best-effort and never blocks
+the supervisor.
+
+### Reference dual-channel handler (Telegram + macOS Notification)
+
+```bash
+#!/bin/bash
+# ~/.claude/watchdog/alert.sh — example dual-channel handler
+set +e
+TYPE="${WATCHDOG_ALERT_TYPE:-info}"
+MSG="${WATCHDOG_ALERT_MSG:-}"
+[ -z "$MSG" ] && exit 0
+
+# macOS notification
+/usr/bin/osascript -e \
+    "display notification \"$MSG\" with title \"claude-watchdog [$TYPE]\"" \
+    2>/dev/null
+
+# Telegram
+TG_ENV="$HOME/.claude/channels/telegram/.env"
+if [ -f "$TG_ENV" ]; then
+    . "$TG_ENV"
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+        /usr/bin/curl -fsS --max-time 10 \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=[claude-watchdog ${TYPE}] ${MSG}" \
+            >/dev/null
+    fi
+fi
+exit 0
+```
+
+## CLI flags (v0.1.6+)
+
+```
+claude-watchdog.sh                Daemon mode (launchd entrypoint)
+claude-watchdog.sh --help         Show help
+claude-watchdog.sh --version      Print version
+claude-watchdog.sh --show-config  Dump effective config
+claude-watchdog.sh --status       Dump runtime state (count, flags, cooldown)
+claude-watchdog.sh --reset        Clear today's counter + both alert flags
+```
+
+`--status` example output:
+
+```
+WATCHDOG_VERSION=0.1.6
+RESTART_COUNT_TODAY=3 / 10
+EFFECTIVE_COOLDOWN=300s
+LAST_RESTART_AGE=1842s
+NEXT_RESTART_ALLOWED_IN=0s
+ALERT_FLAG_CAP_REACHED=clear
+ALERT_FLAG_NOT_LOGGED_IN=clear
+```
 
 ## Requirements
 

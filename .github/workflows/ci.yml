@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and tmux
+        run: brew install shellcheck tmux
+
+      - name: Lint shell scripts
+        run: |
+          shellcheck claude-watchdog.sh
+          shellcheck install.sh
+          shellcheck uninstall.sh
+          shellcheck test/run.sh
+          shellcheck test/lib/assert.sh
+          shellcheck test/integration/helpers/*.sh
+          for f in test/unit/*.test.sh test/integration/*.test.sh; do
+            shellcheck "$f"
+          done
+
+      - name: Run test suite
+        run: bash test/run.sh
