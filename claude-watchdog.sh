@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.5"
+WATCHDOG_VERSION="0.1.6"
 
 # --- CLI flag parsing ---
 # parse_args() handles --help / --version / --show-config / --config <file>.
@@ -39,6 +39,10 @@ Environment variables (all optional):
     WATCHDOG_ALERT_CMD                    shell expression invoked on alerts
                                           (receives WATCHDOG_ALERT_TYPE and
                                           WATCHDOG_ALERT_MSG env vars)
+    WATCHDOG_DAILY_RESTART_CAP            daily kill+restart cap (default: 10;
+                                          set 0 to disable)
+    WATCHDOG_THROTTLED_COOLDOWN           cooldown after cap reached, seconds
+                                          (default: 3600; subject to safety floor)
 
 Detection order:
     A. tmux session missing             -> restart
@@ -109,6 +113,15 @@ init_config() {
     else
         HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_REQUESTED
     fi
+
+    DAILY_RESTART_CAP="${WATCHDOG_DAILY_RESTART_CAP:-10}"
+    THROTTLED_COOLDOWN_REQUESTED="${WATCHDOG_THROTTLED_COOLDOWN:-3600}"
+    # Reuse the existing safety floor (max(value, ~2 launchd cycles + 30s)).
+    if [ "$THROTTLED_COOLDOWN_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
+        THROTTLED_COOLDOWN=$HEARTBEAT_STALE_FLOOR
+    else
+        THROTTLED_COOLDOWN=$THROTTLED_COOLDOWN_REQUESTED
+    fi
 }
 
 # Top-level: populate globals from current env so sourcing the script works
@@ -123,13 +136,14 @@ log() {
 }
 
 check_cooldown() {
+    local cooldown="${1:-$COOLDOWN_SECONDS}"
     if [ -f "$COOLDOWN_FILE" ]; then
         local last_restart now elapsed
         last_restart=$(cat "$COOLDOWN_FILE")
         now=$(date +%s)
         elapsed=$(( now - last_restart ))
-        if [ "$elapsed" -lt "$COOLDOWN_SECONDS" ]; then
-            log "COOLDOWN: Last restart ${elapsed}s ago (< ${COOLDOWN_SECONDS}s). Skipping."
+        if [ "$elapsed" -lt "$cooldown" ]; then
+            log "COOLDOWN: Last restart ${elapsed}s ago (< ${cooldown}s). Skipping."
             return 1
         fi
     fi
@@ -146,7 +160,8 @@ start_claude() {
     # does not bypass in Claude Code v2.1.x, causing infinite restart loops — #10).
     tmux new-session -d -s "$TMUX_SESSION" -c "$HOME" "$CLAUDE_CMD"
     date +%s > "$COOLDOWN_FILE"
-    log "ACTION: Restart complete. Cooldown set."
+    bump_restart_count
+    log "ACTION: Restart complete. Cooldown set. Count today: $(read_restart_count)/$DAILY_RESTART_CAP"
 }
 
 # Echoes one of: disabled | fresh | stale
@@ -221,6 +236,81 @@ mark_alert_sent() {
 
 clear_alert_flag() {
     rm -f "$(alert_flag_path "$1")"
+}
+
+# --- Restart counter (per-day) ---
+#
+# Counter file is named with today's YYYYMMDD so it self-rotates at local
+# midnight without explicit GC. Old files retain a record of past activity
+# (small; no maintenance needed).
+
+today_yyyymmdd() {
+    date +%Y%m%d
+}
+
+restart_count_file() {
+    echo "$LOG_DIR/.watchdog-restart-count-$(today_yyyymmdd)"
+}
+
+read_restart_count() {
+    local f
+    f=$(restart_count_file)
+    if [ -f "$f" ]; then
+        # Tolerate empty/non-numeric content; treat as 0.
+        local v
+        v=$(cat "$f" 2>/dev/null || echo 0)
+        if [[ "$v" =~ ^[0-9]+$ ]]; then
+            echo "$v"
+        else
+            echo 0
+        fi
+    else
+        echo 0
+    fi
+}
+
+bump_restart_count() {
+    local f cur next tmp
+    f=$(restart_count_file)
+    cur=$(read_restart_count)
+    next=$((cur + 1))
+    tmp="$f.tmp"
+    echo "$next" > "$tmp" && mv -f "$tmp" "$f"
+}
+
+# Echoes the cooldown (in seconds) appropriate for the given restart count
+# and CAP setting. CAP=0 disables the cap entirely (always normal).
+effective_cooldown() {
+    local count="$1"
+    if [ "$DAILY_RESTART_CAP" -le 0 ]; then
+        echo "$COOLDOWN_SECONDS"
+    elif [ "$count" -ge "$DAILY_RESTART_CAP" ]; then
+        echo "$THROTTLED_COOLDOWN"
+    else
+        echo "$COOLDOWN_SECONDS"
+    fi
+}
+
+# attempt_restart: cap-aware wrapper around (check_cooldown + start_claude).
+# - Reads today's restart count
+# - Computes the effective cooldown (normal vs throttled based on cap)
+# - If cooldown allows, runs start_claude (which bumps the counter)
+# - If the resulting count crosses the cap, emits a one-shot cap-reached alert
+attempt_restart() {
+    local count eff_cd new_count cap_msg
+    count=$(read_restart_count)
+    eff_cd=$(effective_cooldown "$count")
+    if check_cooldown "$eff_cd"; then
+        start_claude
+        new_count=$(read_restart_count)
+        if [ "$DAILY_RESTART_CAP" -gt 0 ] \
+           && [ "$new_count" -ge "$DAILY_RESTART_CAP" ] \
+           && ! alert_already_sent "cap-$(today_yyyymmdd)"; then
+            cap_msg="Daily restart cap reached ($DAILY_RESTART_CAP) — throttling cooldown to ${THROTTLED_COOLDOWN}s for the rest of the day. Watchdog will continue logging status. Recovery: claude-watchdog --reset (after fixing root cause), or wait for midnight rollover."
+            emit_alert cap-reached "$cap_msg"
+            mark_alert_sent "cap-$(today_yyyymmdd)"
+        fi
+    fi
 }
 
 # Emit an alert. Always writes an "ALERT [<type>]: <msg>" line to the log.
@@ -354,6 +444,9 @@ WATCHDOG_COOLDOWN=$COOLDOWN_SECONDS
 WATCHDOG_PATH=$PATH
 WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
 WATCHDOG_ALERT_CMD=${ALERT_CMD:-(unset, log-only)}
+WATCHDOG_DAILY_RESTART_CAP=$DAILY_RESTART_CAP
+WATCHDOG_THROTTLED_COOLDOWN=$THROTTLED_COOLDOWN (requested=$THROTTLED_COOLDOWN_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
+RESTART_COUNT_TODAY=$(read_restart_count)
 LOG_FILE=$LOG_FILE
 COOLDOWN_FILE=$COOLDOWN_FILE
 EOF
@@ -365,9 +458,7 @@ EOF
     # Case A: tmux session does not exist
     if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         log "DETECT: tmux session '$TMUX_SESSION' not found"
-        if check_cooldown; then
-            start_claude
-        fi
+        attempt_restart
         exit 0
     fi
 
@@ -438,9 +529,7 @@ EOF
     esac
 
     if [ "$SHOULD_RESTART" -eq 1 ]; then
-        if check_cooldown; then
-            start_claude
-        fi
+        attempt_restart
         exit 0
     fi
 
@@ -448,9 +537,7 @@ EOF
     PANE_PID=$(tmux display-message -t "$TMUX_SESSION" -p '#{pane_pid}')
     if ! pgrep -P "$PANE_PID" -f "claude" >/dev/null 2>&1; then
         log "DETECT: No claude process found in tmux session (pane_pid=$PANE_PID)"
-        if check_cooldown; then
-            start_claude
-        fi
+        attempt_restart
         exit 0
     fi
 
