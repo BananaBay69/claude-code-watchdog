@@ -284,6 +284,23 @@ outbound_state() {
     fi
 }
 
+# Echoes the count of inbound channel markers in $1 (pane content).
+# Currently matches Telegram's "← telegram · <CHATID>:" line prefix that
+# the channels plugin emits. Anchored at line start (^) to avoid false
+# positives from user prompt content.
+count_pane_incoming() {
+    local pane="$1"
+    if [ -z "$pane" ]; then
+        echo 0
+        return
+    fi
+    # grep -c counts matching lines. Returns 1 when no matches under set -e,
+    # so use `|| echo 0` to coerce.
+    local n
+    n=$(echo "$pane" | grep -cE '^← telegram · [0-9]+:' || true)
+    echo "${n:-0}"
+}
+
 # --- Alert state helpers ---
 #
 # Alert flag files live in $LOG_DIR alongside .watchdog-last-restart.
