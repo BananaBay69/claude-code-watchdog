@@ -12,6 +12,8 @@ WATCHDOG_VERSION="0.1.5"
 
 SHOW_CONFIG=0
 CONFIG_FILE=""
+DO_RESET=0
+SHOW_STATUS=0
 
 parse_args() {
     while [ "$#" -gt 0 ]; do
@@ -26,6 +28,8 @@ Usage:
     claude-watchdog.sh --version          Print version
     claude-watchdog.sh --show-config      Dump effective config and exit
     claude-watchdog.sh --config <file>    Source experimental config file then exit 0
+    claude-watchdog.sh --reset            Clear today's counter + alert flags (post-recovery)
+    claude-watchdog.sh --status           Print runtime state (count, flags, cooldown) and exit
 
 Environment variables (all optional):
     WATCHDOG_SESSION                      tmux session name (default: claude)
@@ -69,6 +73,14 @@ USAGE
                 fi
                 CONFIG_FILE="$2"
                 shift 2
+                ;;
+            --reset)
+                DO_RESET=1
+                shift
+                ;;
+            --status)
+                SHOW_STATUS=1
+                shift
                 ;;
             --)
                 shift
@@ -313,6 +325,61 @@ attempt_restart() {
     fi
 }
 
+do_reset() {
+    local today f removed=0
+    today=$(today_yyyymmdd)
+    for f in \
+        "$LOG_DIR/.watchdog-restart-count-$today" \
+        "$LOG_DIR/.watchdog-alert-sent-cap-$today" \
+        "$LOG_DIR/.watchdog-alert-sent-not-logged-in"; do
+        if [ -e "$f" ]; then
+            rm -f "$f"
+            removed=$((removed + 1))
+            echo "removed: $f"
+        fi
+    done
+    if [ "$removed" -eq 0 ]; then
+        echo "no state files to remove"
+    fi
+}
+
+show_status() {
+    local count eff_cd last_restart now elapsed remaining flag_cap flag_term
+    count=$(read_restart_count)
+    eff_cd=$(effective_cooldown "$count")
+    if [ -f "$COOLDOWN_FILE" ]; then
+        last_restart=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        elapsed=$(( now - last_restart ))
+        remaining=$(( eff_cd - elapsed ))
+        [ "$remaining" -lt 0 ] && remaining=0
+        elapsed="${elapsed}s"
+        remaining="${remaining}s"
+    else
+        elapsed="(never)"
+        remaining="0s"
+    fi
+    if alert_already_sent "cap-$(today_yyyymmdd)"; then
+        flag_cap="set"
+    else
+        flag_cap="clear"
+    fi
+    if alert_already_sent not-logged-in; then
+        flag_term="set"
+    else
+        flag_term="clear"
+    fi
+    cat <<EOF
+WATCHDOG_VERSION=$WATCHDOG_VERSION
+RESTART_COUNT_TODAY=$count / $DAILY_RESTART_CAP
+EFFECTIVE_COOLDOWN=${eff_cd}s
+LAST_RESTART_AGE=$elapsed
+NEXT_RESTART_ALLOWED_IN=$remaining
+ALERT_FLAG_CAP_REACHED=$flag_cap
+ALERT_FLAG_NOT_LOGGED_IN=$flag_term
+EOF
+}
+
 # Emit an alert. Always writes an "ALERT [<type>]: <msg>" line to the log.
 # If $ALERT_CMD is set, invokes it with WATCHDOG_ALERT_TYPE and
 # WATCHDOG_ALERT_MSG env vars. Failures are logged as WARN but do not
@@ -430,6 +497,17 @@ main() {
         # shellcheck disable=SC1090
         . "$CONFIG_FILE"
         init_config
+    fi
+
+    # --reset and --status: operator inspection commands — exit before setup_logging
+    # so they don't trigger log rotation or any writes
+    if [ "$DO_RESET" -eq 1 ]; then
+        do_reset
+        exit 0
+    fi
+    if [ "$SHOW_STATUS" -eq 1 ]; then
+        show_status
+        exit 0
     fi
 
     # --show-config exits before any side-effects
