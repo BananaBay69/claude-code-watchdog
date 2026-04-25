@@ -349,6 +349,10 @@ show_status() {
     eff_cd=$(effective_cooldown "$count")
     if [ -f "$COOLDOWN_FILE" ]; then
         last_restart=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+        # Tolerate corrupted cooldown file: non-numeric content → treat as 0
+        # (same defensive pattern as read_restart_count). Without this, a
+        # garbage cooldown file would crash --status under set -u.
+        [[ "$last_restart" =~ ^[0-9]+$ ]] || last_restart=0
         now=$(date +%s)
         elapsed=$(( now - last_restart ))
         remaining=$(( eff_cd - elapsed ))
