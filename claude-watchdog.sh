@@ -7,17 +7,17 @@ set -euo pipefail
 WATCHDOG_VERSION="0.1.5"
 
 # --- CLI flag parsing ---
-# No args => daemon mode (launchd entrypoint, unchanged behavior).
-# Flags are handled before config evaluation where possible, so --help
-# and --version work even if HOME is unset.
+# parse_args() handles --help / --version / --show-config / --config <file>.
+# Called from main() — when sourced, args are not parsed.
 
 SHOW_CONFIG=0
 CONFIG_FILE=""
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        -h|--help)
-            cat <<'USAGE'
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                cat <<'USAGE'
 claude-watchdog — supervise a Claude Code tmux session and restart on stuck states
 
 Usage:
@@ -45,46 +45,39 @@ Detection order:
 Backward compatibility: existing installs on pre-v0.1 layouts are supported via
 install.sh --log-dir / --heartbeat-file / --session flags. See CONTRIBUTING.md.
 USAGE
-            exit 0
-            ;;
-        -V|--version)
-            echo "$WATCHDOG_VERSION"
-            exit 0
-            ;;
-        --show-config)
-            SHOW_CONFIG=1
-            shift
-            ;;
-        --config)
-            if [ "$#" -lt 2 ]; then
-                echo "error: --config requires a file path" >&2
+                exit 0
+                ;;
+            -V|--version)
+                echo "$WATCHDOG_VERSION"
+                exit 0
+                ;;
+            --show-config)
+                SHOW_CONFIG=1
+                shift
+                ;;
+            --config)
+                if [ "$#" -lt 2 ]; then
+                    echo "error: --config requires a file path" >&2
+                    exit 2
+                fi
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                echo "error: unknown argument '$1' (try --help)" >&2
                 exit 2
-            fi
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --)
-            shift
-            break
-            ;;
-        *)
-            echo "error: unknown argument '$1' (try --help)" >&2
-            exit 2
-            ;;
-    esac
-done
+                ;;
+        esac
+    done
+}
 
 # --- Configuration ---
 # Override via environment variables or the experimental --config <file> flag.
-
-if [ -n "$CONFIG_FILE" ]; then
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "error: --config file not found: $CONFIG_FILE" >&2
-        exit 2
-    fi
-    # shellcheck disable=SC1090
-    . "$CONFIG_FILE"
-fi
+# Note: --config file sourcing happens in main() after parse_args() sets CONFIG_FILE.
 
 export PATH="${WATCHDOG_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
@@ -107,22 +100,6 @@ if [ "$HEARTBEAT_STALE_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
     HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_FLOOR
 else
     HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_REQUESTED
-fi
-
-if [ "$SHOW_CONFIG" -eq 1 ]; then
-    cat <<EOF
-WATCHDOG_VERSION=$WATCHDOG_VERSION
-WATCHDOG_SESSION=$TMUX_SESSION
-WATCHDOG_LOG_DIR=$LOG_DIR
-WATCHDOG_HEARTBEAT_FILE=${HEARTBEAT_FILE:-(disabled)}
-WATCHDOG_HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_SECONDS (requested=$HEARTBEAT_STALE_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
-WATCHDOG_COOLDOWN=$COOLDOWN_SECONDS
-WATCHDOG_PATH=$PATH
-WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
-LOG_FILE=$LOG_FILE
-COOLDOWN_FILE=$COOLDOWN_FILE
-EOF
-    exit 0
 fi
 
 # --- Helpers ---
@@ -203,15 +180,14 @@ heartbeat_state() {
     fi
 }
 
-# --- Setup ---
-
-mkdir -p "$LOG_DIR"
-
-# Log rotation: keep last 500 lines if > 1MB
-if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$MAX_LOG_BYTES" ]; then
-    tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
-    log "Log rotated (exceeded 1MB)"
-fi
+setup_logging() {
+    mkdir -p "$LOG_DIR"
+    # Log rotation: keep last 500 lines if > 1MB
+    if [ -f "$LOG_FILE" ] && [ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$MAX_LOG_BYTES" ]; then
+        tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+        log "Log rotated (exceeded 1MB)"
+    fi
+}
 
 # --- Stuck patterns ---
 
@@ -228,75 +204,109 @@ PATTERN=$(IFS='|'; echo "${STUCK_PATTERNS[*]}")
 
 # --- Main ---
 
-# Case A: tmux session does not exist
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    log "DETECT: tmux session '$TMUX_SESSION' not found"
-    if check_cooldown; then
-        start_claude
+main() {
+    parse_args "$@"
+
+    # --config: source experimental config file (sets/overrides env vars)
+    if [ -n "$CONFIG_FILE" ]; then
+        if [ ! -f "$CONFIG_FILE" ]; then
+            echo "error: --config file not found: $CONFIG_FILE" >&2
+            exit 2
+        fi
+        # shellcheck disable=SC1090
+        . "$CONFIG_FILE"
     fi
-    exit 0
-fi
 
-# Case B: tmux session exists — check for stuck state using heartbeat
-# (primary when enabled) and pane-scrape grep (cross-check / fallback).
-PANE_OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -50)
-
-GREP_MATCHED=0
-MATCHED=""
-if echo "$PANE_OUTPUT" | grep -qE "$PATTERN"; then
-    GREP_MATCHED=1
-    MATCHED=$(echo "$PANE_OUTPUT" | grep -oE "$PATTERN" | head -1)
-fi
-
-HB_STATE=$(heartbeat_state)
-SHOULD_RESTART=0
-
-case "$HB_STATE:$GREP_MATCHED" in
-    stale:1)
-        log "DETECT: heartbeat stale AND pane pattern '$MATCHED' (signals agree)"
-        SHOULD_RESTART=1
-        ;;
-    stale:0)
-        # v0.1.5: do NOT restart on heartbeat-stale-alone. Idle bots that
-        # haven't received a UserPromptSubmit/Stop event in `WATCHDOG_HEARTBEAT_STALE_SECONDS`
-        # produce a stale heartbeat naturally — restarting them was a false
-        # positive. Fall through to Case C (process-alive check) which catches
-        # the actually-stuck-without-pattern scenario.
-        log "INFO: heartbeat stale but pane clean — likely idle; deferring to process check"
-        ;;
-    fresh:1)
-        log "WARN: pane pattern '$MATCHED' matched but heartbeat fresh; restarting (grep authoritative — may be false positive from conversation content)"
-        SHOULD_RESTART=1
-        ;;
-    fresh:0)
-        : # both clean, fall through to Case C
-        ;;
-    disabled:1)
-        # Phase 0 backward-compat path: heartbeat unavailable, grep decides alone.
-        log "DETECT: Stuck state found: '$MATCHED'"
-        SHOULD_RESTART=1
-        ;;
-    disabled:0)
-        : # grep-only, clean, fall through to Case C
-        ;;
-esac
-
-if [ "$SHOULD_RESTART" -eq 1 ]; then
-    if check_cooldown; then
-        start_claude
+    # --show-config exits before any side-effects
+    if [ "$SHOW_CONFIG" -eq 1 ]; then
+        cat <<EOF
+WATCHDOG_VERSION=$WATCHDOG_VERSION
+WATCHDOG_SESSION=$TMUX_SESSION
+WATCHDOG_LOG_DIR=$LOG_DIR
+WATCHDOG_HEARTBEAT_FILE=${HEARTBEAT_FILE:-(disabled)}
+WATCHDOG_HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_SECONDS (requested=$HEARTBEAT_STALE_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
+WATCHDOG_COOLDOWN=$COOLDOWN_SECONDS
+WATCHDOG_PATH=$PATH
+WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
+LOG_FILE=$LOG_FILE
+COOLDOWN_FILE=$COOLDOWN_FILE
+EOF
+        exit 0
     fi
-    exit 0
-fi
 
-# Case C: tmux session exists but claude process died
-PANE_PID=$(tmux display-message -t "$TMUX_SESSION" -p '#{pane_pid}')
-if ! pgrep -P "$PANE_PID" -f "claude" >/dev/null 2>&1; then
-    log "DETECT: No claude process found in tmux session (pane_pid=$PANE_PID)"
-    if check_cooldown; then
-        start_claude
+    setup_logging
+
+    # Case A: tmux session does not exist
+    if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+        log "DETECT: tmux session '$TMUX_SESSION' not found"
+        if check_cooldown; then
+            start_claude
+        fi
+        exit 0
     fi
-    exit 0
-fi
 
-log "OK: Session alive, no stuck patterns detected"
-exit 0
+    # Case B: tmux session exists — check for stuck state using heartbeat
+    # (primary when enabled) and pane-scrape grep (cross-check / fallback).
+    PANE_OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -50)
+
+    GREP_MATCHED=0
+    MATCHED=""
+    if echo "$PANE_OUTPUT" | grep -qE "$PATTERN"; then
+        GREP_MATCHED=1
+        MATCHED=$(echo "$PANE_OUTPUT" | grep -oE "$PATTERN" | head -1)
+    fi
+
+    HB_STATE=$(heartbeat_state)
+    SHOULD_RESTART=0
+
+    case "$HB_STATE:$GREP_MATCHED" in
+        stale:1)
+            log "DETECT: heartbeat stale AND pane pattern '$MATCHED' (signals agree)"
+            SHOULD_RESTART=1
+            ;;
+        stale:0)
+            log "INFO: heartbeat stale but pane clean — likely idle; deferring to process check"
+            ;;
+        fresh:1)
+            log "WARN: pane pattern '$MATCHED' matched but heartbeat fresh; restarting (grep authoritative — may be false positive from conversation content)"
+            SHOULD_RESTART=1
+            ;;
+        fresh:0)
+            : # both clean, fall through to Case C
+            ;;
+        disabled:1)
+            log "DETECT: Stuck state found: '$MATCHED'"
+            SHOULD_RESTART=1
+            ;;
+        disabled:0)
+            : # grep-only, clean, fall through to Case C
+            ;;
+    esac
+
+    if [ "$SHOULD_RESTART" -eq 1 ]; then
+        if check_cooldown; then
+            start_claude
+        fi
+        exit 0
+    fi
+
+    # Case C: tmux session exists but claude process died
+    PANE_PID=$(tmux display-message -t "$TMUX_SESSION" -p '#{pane_pid}')
+    if ! pgrep -P "$PANE_PID" -f "claude" >/dev/null 2>&1; then
+        log "DETECT: No claude process found in tmux session (pane_pid=$PANE_PID)"
+        if check_cooldown; then
+            start_claude
+        fi
+        exit 0
+    fi
+
+    log "OK: Session alive, no stuck patterns detected"
+    exit 0
+}
+
+# Source-guard: only run main when this script is executed, not sourced.
+# When sourced (e.g. by tests), config is set and functions are defined,
+# but main() is not invoked.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+    main "$@"
+fi
