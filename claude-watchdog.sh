@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.6"
+WATCHDOG_VERSION="0.1.7"
 
 # --- CLI flag parsing ---
 # parse_args() handles --help / --version / --show-config / --config <file>.
@@ -47,11 +47,19 @@ Environment variables (all optional):
                                           set 0 to disable)
     WATCHDOG_THROTTLED_COOLDOWN           cooldown after cap reached, seconds
                                           (default: 3600; subject to safety floor)
+    WATCHDOG_SILENT_LOOP_ENABLED          enable silent-loop detection (default: 0)
+    WATCHDOG_OUTBOUND_FILE                outbound timestamp file (default: $HOME/.claude/watchdog/outbound)
+    WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD
+                                          min incoming msgs in pane to trigger (default: 2)
+    WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS
+                                          outbound stale threshold, seconds (default: 600)
+    WATCHDOG_SILENT_LOOP_PANE_LINES       pane lines to scan for incoming (default: 200)
 
 Detection order:
     A. tmux session missing             -> restart
     B. heartbeat stale OR grep matched  -> restart (WARN on disagreement)
     C. claude process dead in pane      -> restart
+    D. silent-loop (opt-in)             -> alert-only (no restart)
 
 Backward compatibility: existing installs on pre-v0.1 layouts are supported via
 install.sh --log-dir / --heartbeat-file / --session flags. See CONTRIBUTING.md.
@@ -134,6 +142,19 @@ init_config() {
     else
         THROTTLED_COOLDOWN=$THROTTLED_COOLDOWN_REQUESTED
     fi
+
+    # v0.1.7: silent-loop detection (opt-in)
+    SILENT_LOOP_ENABLED="${WATCHDOG_SILENT_LOOP_ENABLED:-0}"
+    OUTBOUND_FILE="${WATCHDOG_OUTBOUND_FILE:-$HOME/.claude/watchdog/outbound}"
+    SILENT_LOOP_INCOMING_THRESHOLD="${WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD:-2}"
+    # Reuse the heartbeat safety floor (~2 launchd cycles)
+    SILENT_LOOP_OUTBOUND_STALE_REQUESTED="${WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS:-600}"
+    if [ "$SILENT_LOOP_OUTBOUND_STALE_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
+        SILENT_LOOP_OUTBOUND_STALE_SECONDS=$HEARTBEAT_STALE_FLOOR
+    else
+        SILENT_LOOP_OUTBOUND_STALE_SECONDS=$SILENT_LOOP_OUTBOUND_STALE_REQUESTED
+    fi
+    SILENT_LOOP_PANE_LINES="${WATCHDOG_SILENT_LOOP_PANE_LINES:-200}"
 }
 
 # Top-level: populate globals from current env so sourcing the script works
@@ -528,6 +549,11 @@ WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
 WATCHDOG_ALERT_CMD=${ALERT_CMD:-(unset, log-only)}
 WATCHDOG_DAILY_RESTART_CAP=$DAILY_RESTART_CAP
 WATCHDOG_THROTTLED_COOLDOWN=$THROTTLED_COOLDOWN (requested=$THROTTLED_COOLDOWN_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
+WATCHDOG_SILENT_LOOP_ENABLED=$SILENT_LOOP_ENABLED
+WATCHDOG_OUTBOUND_FILE=$OUTBOUND_FILE
+WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD=$SILENT_LOOP_INCOMING_THRESHOLD
+WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS=$SILENT_LOOP_OUTBOUND_STALE_SECONDS (requested=$SILENT_LOOP_OUTBOUND_STALE_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
+WATCHDOG_SILENT_LOOP_PANE_LINES=$SILENT_LOOP_PANE_LINES
 RESTART_COUNT_TODAY=$(read_restart_count)
 LOG_FILE=$LOG_FILE
 COOLDOWN_FILE=$COOLDOWN_FILE
