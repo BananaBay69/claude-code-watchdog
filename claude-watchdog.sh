@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.6"
+WATCHDOG_VERSION="0.1.7"
 
 # --- CLI flag parsing ---
 # parse_args() handles --help / --version / --show-config / --config <file>.
@@ -47,11 +47,19 @@ Environment variables (all optional):
                                           set 0 to disable)
     WATCHDOG_THROTTLED_COOLDOWN           cooldown after cap reached, seconds
                                           (default: 3600; subject to safety floor)
+    WATCHDOG_SILENT_LOOP_ENABLED          enable silent-loop detection (default: 0)
+    WATCHDOG_OUTBOUND_FILE                outbound timestamp file (default: $HOME/.claude/watchdog/outbound)
+    WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD
+                                          min incoming msgs in pane to trigger (default: 2)
+    WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS
+                                          outbound stale threshold, seconds (default: 600)
+    WATCHDOG_SILENT_LOOP_PANE_LINES       pane lines to scan for incoming (default: 200)
 
 Detection order:
     A. tmux session missing             -> restart
     B. heartbeat stale OR grep matched  -> restart (WARN on disagreement)
     C. claude process dead in pane      -> restart
+    D. silent-loop (opt-in)             -> alert-only (no restart)
 
 Backward compatibility: existing installs on pre-v0.1 layouts are supported via
 install.sh --log-dir / --heartbeat-file / --session flags. See CONTRIBUTING.md.
@@ -134,6 +142,19 @@ init_config() {
     else
         THROTTLED_COOLDOWN=$THROTTLED_COOLDOWN_REQUESTED
     fi
+
+    # v0.1.7: silent-loop detection (opt-in)
+    SILENT_LOOP_ENABLED="${WATCHDOG_SILENT_LOOP_ENABLED:-0}"
+    OUTBOUND_FILE="${WATCHDOG_OUTBOUND_FILE:-$HOME/.claude/watchdog/outbound}"
+    SILENT_LOOP_INCOMING_THRESHOLD="${WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD:-2}"
+    # Reuse the heartbeat safety floor (~2 launchd cycles)
+    SILENT_LOOP_OUTBOUND_STALE_REQUESTED="${WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS:-600}"
+    if [ "$SILENT_LOOP_OUTBOUND_STALE_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
+        SILENT_LOOP_OUTBOUND_STALE_SECONDS=$HEARTBEAT_STALE_FLOOR
+    else
+        SILENT_LOOP_OUTBOUND_STALE_SECONDS=$SILENT_LOOP_OUTBOUND_STALE_REQUESTED
+    fi
+    SILENT_LOOP_PANE_LINES="${WATCHDOG_SILENT_LOOP_PANE_LINES:-200}"
 }
 
 # Top-level: populate globals from current env so sourcing the script works
@@ -219,6 +240,97 @@ heartbeat_state() {
     else
         echo "fresh"
     fi
+}
+
+# Echoes one of: disabled | fresh | stale
+#
+# Same v1 schema as heartbeat: "1 <unix_ts>". Read by Case D (silent-loop)
+# to determine whether the bot has produced an outbound reply within the
+# configured window.
+#
+# "disabled" reserved for "no signal available" — env unset or file missing —
+# in which case Case D is skipped (cannot determine silent-loop without
+# outbound signal).
+outbound_state() {
+    if [ -z "$OUTBOUND_FILE" ]; then
+        echo "disabled"
+        return
+    fi
+    if [ ! -f "$OUTBOUND_FILE" ]; then
+        echo "disabled"
+        return
+    fi
+    local schema ob_ts now age
+    schema=""
+    ob_ts=""
+    # shellcheck disable=SC2162
+    read schema ob_ts _rest < "$OUTBOUND_FILE" 2>/dev/null || true
+    if [ "$schema" != "1" ]; then
+        log "WARN: outbound unsupported schema '$schema' in $OUTBOUND_FILE — treating as stale"
+        echo "stale"
+        return
+    fi
+    if ! [[ "$ob_ts" =~ ^[0-9]+$ ]]; then
+        log "WARN: outbound malformed timestamp '$ob_ts' in $OUTBOUND_FILE — treating as stale"
+        echo "stale"
+        return
+    fi
+    now=$(date +%s)
+    age=$(( now - ob_ts ))
+    if [ "$age" -gt "$SILENT_LOOP_OUTBOUND_STALE_SECONDS" ]; then
+        echo "stale"
+    else
+        echo "fresh"
+    fi
+}
+
+# Echoes the count of inbound channel markers in $1 (pane content).
+# Currently matches Telegram's "← telegram · <CHATID>:" line prefix that
+# the channels plugin emits. Anchored at line start (^) to avoid false
+# positives from user prompt content.
+count_pane_incoming() {
+    local pane="$1"
+    if [ -z "$pane" ]; then
+        echo 0
+        return
+    fi
+    # grep -c counts matching lines. Returns 1 when no matches under set -e,
+    # so use `|| echo 0` to coerce.
+    local n
+    n=$(echo "$pane" | grep -cE '^← telegram · [0-9]+:' || true)
+    echo "${n:-0}"
+}
+
+# Echoes "yes:<reason>" if silent-loop detected, "no:<reason>" otherwise.
+#
+# Args: $1 = incoming count (int)
+#       $2 = outbound state (disabled|fresh|stale)
+#
+# Decision matrix (only fires when SILENT_LOOP_ENABLED=1):
+#   incoming < threshold       -> no:below-threshold
+#   outbound = disabled        -> no:no-outbound-signal (cannot determine)
+#   outbound = fresh           -> no:outbound-fresh
+#   outbound = stale           -> yes:incoming=N outbound-stale
+detect_silent_loop() {
+    local incoming="$1"
+    local ob_state="$2"
+    if [ "$SILENT_LOOP_ENABLED" -ne 1 ]; then
+        echo "no:disabled"
+        return
+    fi
+    if [ "$incoming" -lt "$SILENT_LOOP_INCOMING_THRESHOLD" ]; then
+        echo "no:below-threshold(incoming=$incoming threshold=$SILENT_LOOP_INCOMING_THRESHOLD)"
+        return
+    fi
+    if [ "$ob_state" = "disabled" ]; then
+        echo "no:no-outbound-signal"
+        return
+    fi
+    if [ "$ob_state" = "fresh" ]; then
+        echo "no:outbound-fresh"
+        return
+    fi
+    echo "yes:incoming=$incoming outbound-stale"
 }
 
 # --- Alert state helpers ---
@@ -331,7 +443,8 @@ do_reset() {
     for f in \
         "$LOG_DIR/.watchdog-restart-count-$today" \
         "$LOG_DIR/.watchdog-alert-sent-cap-$today" \
-        "$LOG_DIR/.watchdog-alert-sent-not-logged-in"; do
+        "$LOG_DIR/.watchdog-alert-sent-not-logged-in" \
+        "$LOG_DIR/.watchdog-alert-sent-silent-loop"; do
         if [ -e "$f" ]; then
             rm -f "$f"
             removed=$((removed + 1))
@@ -344,7 +457,7 @@ do_reset() {
 }
 
 show_status() {
-    local count eff_cd last_restart now elapsed remaining flag_cap flag_term
+    local count eff_cd last_restart now elapsed remaining flag_cap flag_term flag_silent
     count=$(read_restart_count)
     eff_cd=$(effective_cooldown "$count")
     if [ -f "$COOLDOWN_FILE" ]; then
@@ -373,6 +486,11 @@ show_status() {
     else
         flag_term="clear"
     fi
+    if alert_already_sent silent-loop; then
+        flag_silent="set"
+    else
+        flag_silent="clear"
+    fi
     cat <<EOF
 WATCHDOG_VERSION=$WATCHDOG_VERSION
 RESTART_COUNT_TODAY=$count / $DAILY_RESTART_CAP
@@ -381,6 +499,7 @@ LAST_RESTART_AGE=$elapsed
 NEXT_RESTART_ALLOWED_IN=$remaining
 ALERT_FLAG_CAP_REACHED=$flag_cap
 ALERT_FLAG_NOT_LOGGED_IN=$flag_term
+ALERT_FLAG_SILENT_LOOP=$flag_silent
 EOF
 }
 
@@ -528,6 +647,11 @@ WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
 WATCHDOG_ALERT_CMD=${ALERT_CMD:-(unset, log-only)}
 WATCHDOG_DAILY_RESTART_CAP=$DAILY_RESTART_CAP
 WATCHDOG_THROTTLED_COOLDOWN=$THROTTLED_COOLDOWN (requested=$THROTTLED_COOLDOWN_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
+WATCHDOG_SILENT_LOOP_ENABLED=$SILENT_LOOP_ENABLED
+WATCHDOG_OUTBOUND_FILE=$OUTBOUND_FILE
+WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD=$SILENT_LOOP_INCOMING_THRESHOLD
+WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS=$SILENT_LOOP_OUTBOUND_STALE_SECONDS (requested=$SILENT_LOOP_OUTBOUND_STALE_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
+WATCHDOG_SILENT_LOOP_PANE_LINES=$SILENT_LOOP_PANE_LINES
 RESTART_COUNT_TODAY=$(read_restart_count)
 LOG_FILE=$LOG_FILE
 COOLDOWN_FILE=$COOLDOWN_FILE
@@ -623,7 +747,38 @@ EOF
         exit 0
     fi
 
-    log "OK: Session alive, no stuck patterns detected"
+    # Case D: silent-loop (opt-in via WATCHDOG_SILENT_LOOP_ENABLED=1)
+    # Distinguishes (a) genuinely idle bot from (b) bot consuming inputs but
+    # not producing outbound replies. Alert only — never restart (root cause
+    # is typically SKILL.md instruction-leak which restart cannot fix).
+    INCOMING_COUNT=$(count_pane_incoming "$PANE_OUTPUT")
+    OB_STATE=$(outbound_state)
+    SILENT_RESULT=$(detect_silent_loop "$INCOMING_COUNT" "$OB_STATE")
+    if [ "${SILENT_RESULT%%:*}" = "yes" ]; then
+        if ! alert_already_sent silent-loop; then
+            local silent_msg
+            silent_msg="Silent loop detected: ${SILENT_RESULT#*:}. Bot pane shows incoming channel messages but no outbound reply within ${SILENT_LOOP_OUTBOUND_STALE_SECONDS}s. Restart will NOT fix (root cause typically SKILL.md instruction-leak). Recovery: ssh into host, tmux capture-pane -t $TMUX_SESSION, inspect skill behavior."
+            emit_alert silent-loop "$silent_msg"
+            mark_alert_sent silent-loop
+        else
+            log "INFO: silent-loop still present (${SILENT_RESULT#*:}, alert already sent — silent until cleared)"
+        fi
+    else
+        if alert_already_sent silent-loop; then
+            log "INFO: silent-loop cleared (${SILENT_RESULT#*:}) — removing alert flag"
+            clear_alert_flag silent-loop
+        fi
+        # Only log the no-detection state when enabled (avoid log spam when default-disabled)
+        if [ "$SILENT_LOOP_ENABLED" -eq 1 ]; then
+            log "INFO: silent-loop check: ${SILENT_RESULT#*:}"
+        fi
+    fi
+
+    if [ "$SILENT_LOOP_ENABLED" -eq 1 ]; then
+        log "OK: Session alive, no stuck patterns detected (silent-loop: ${SILENT_RESULT##*:})"
+    else
+        log "OK: Session alive, no stuck patterns detected"
+    fi
     exit 0
 }
 

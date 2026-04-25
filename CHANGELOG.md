@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.7 (2026-04-26)
+
+### Added
+- **Silent-loop detection** (opt-in via `WATCHDOG_SILENT_LOOP_ENABLED=1`) — Case D in main loop. Counts inbound channel markers in pane (`← telegram · CHATID:`) and cross-references with outbound file mtime (`$WATCHDOG_OUTBOUND_FILE`, written by bananabay-watchdog plugin v0.2.0+). If incoming ≥ threshold and outbound stale beyond window → emits `silent-loop` alert with state-based dedup.
+- New env vars: `WATCHDOG_SILENT_LOOP_ENABLED`, `WATCHDOG_OUTBOUND_FILE`, `WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD`, `WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS`, `WATCHDOG_SILENT_LOOP_PANE_LINES`.
+- New helpers: `outbound_state()`, `count_pane_incoming()`, `detect_silent_loop()`.
+- `do_reset` now also clears `silent-loop` alert flag; `--status` exposes `ALERT_FLAG_SILENT_LOOP`.
+- Tests: 3 unit (`outbound-state`, `count-incoming`, `silent-loop-detect`) + 2 integration (`silent-loop-alert`, `silent-loop-disabled`). Total: 14 pass / 0 fail.
+
+### Notes
+- **No restart on silent-loop** — alert-only by design. Root causes (SKILL.md instruction-leak) re-enter on restart.
+- **Telegram only** in this release. Discord and other channels require additional `PostToolUse` matchers in plugin hooks.json (trivial extension).
+- **PoC pane-scrape for incoming**; production-grade Telegram `getUpdates` poller deferred to v0.1.8 (issue TBD).
+- Backward-compatible — defaults to disabled. Existing v0.1.6 installs are unaffected until they opt in.
+
+Closes #15.
+
 ## v0.1.6 — 2026-04-25
 
 ### Added
