@@ -77,30 +77,40 @@ USAGE
 
 # --- Configuration ---
 # Override via environment variables or the experimental --config <file> flag.
-# Note: --config file sourcing happens in main() after parse_args() sets CONFIG_FILE.
+# init_config() resolves WATCHDOG_* env vars into the globals used by helpers.
+# It is called once at top-level so that sourcing the script (e.g. by unit
+# tests) immediately populates all globals.  main() re-calls it after sourcing
+# a --config file so that file overrides take effect before any logic runs.
 
-export PATH="${WATCHDOG_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+init_config() {
+    export PATH="${WATCHDOG_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
-TMUX_SESSION="${WATCHDOG_SESSION:-claude}"
-LOG_DIR="${WATCHDOG_LOG_DIR:-$HOME/.claude/watchdog/logs}"
-LOG_FILE="$LOG_DIR/claude-watchdog.log"
-COOLDOWN_FILE="$LOG_DIR/.watchdog-last-restart"
-COOLDOWN_SECONDS="${WATCHDOG_COOLDOWN:-300}"
-MAX_LOG_BYTES=1048576
+    TMUX_SESSION="${WATCHDOG_SESSION:-claude}"
+    LOG_DIR="${WATCHDOG_LOG_DIR:-$HOME/.claude/watchdog/logs}"
+    LOG_FILE="$LOG_DIR/claude-watchdog.log"
+    COOLDOWN_FILE="$LOG_DIR/.watchdog-last-restart"
+    COOLDOWN_SECONDS="${WATCHDOG_COOLDOWN:-300}"
+    MAX_LOG_BYTES=1048576
 
-CLAUDE_CMD="${WATCHDOG_CLAUDE_CMD:-export PATH=$PATH && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official --channels plugin:discord@claude-plugins-official}"
+    CLAUDE_CMD="${WATCHDOG_CLAUDE_CMD:-export PATH=$PATH && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official --channels plugin:discord@claude-plugins-official}"
 
-HEARTBEAT_FILE="${WATCHDOG_HEARTBEAT_FILE:-}"
-HEARTBEAT_STALE_REQUESTED="${WATCHDOG_HEARTBEAT_STALE_SECONDS:-600}"
-# Safety floor: never trust a stale threshold tighter than ~2 launchd cycles
-# (assumes StartInterval=180). Users can always raise the threshold; floor
-# only kicks in when an unrealistically small value is set.
-HEARTBEAT_STALE_FLOOR=390
-if [ "$HEARTBEAT_STALE_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
-    HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_FLOOR
-else
-    HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_REQUESTED
-fi
+    HEARTBEAT_FILE="${WATCHDOG_HEARTBEAT_FILE:-}"
+    HEARTBEAT_STALE_REQUESTED="${WATCHDOG_HEARTBEAT_STALE_SECONDS:-600}"
+    # Safety floor: never trust a stale threshold tighter than ~2 launchd cycles
+    # (assumes StartInterval=180). Users can always raise the threshold; floor
+    # only kicks in when an unrealistically small value is set.
+    HEARTBEAT_STALE_FLOOR=390
+    if [ "$HEARTBEAT_STALE_REQUESTED" -lt "$HEARTBEAT_STALE_FLOOR" ]; then
+        HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_FLOOR
+    else
+        HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_REQUESTED
+    fi
+}
+
+# Top-level: populate globals from current env so sourcing the script works
+# for tests.  main() will re-call init_config after --config file source so
+# file overrides take effect.
+init_config
 
 # --- Helpers ---
 
@@ -207,7 +217,8 @@ PATTERN=$(IFS='|'; echo "${STUCK_PATTERNS[*]}")
 main() {
     parse_args "$@"
 
-    # --config: source experimental config file (sets/overrides env vars)
+    # --config: source experimental config file (sets/overrides env vars),
+    # then re-run init_config so WATCHDOG_* values from the file take effect.
     if [ -n "$CONFIG_FILE" ]; then
         if [ ! -f "$CONFIG_FILE" ]; then
             echo "error: --config file not found: $CONFIG_FILE" >&2
@@ -215,6 +226,7 @@ main() {
         fi
         # shellcheck disable=SC1090
         . "$CONFIG_FILE"
+        init_config
     fi
 
     # --show-config exits before any side-effects
@@ -265,6 +277,11 @@ EOF
             SHOULD_RESTART=1
             ;;
         stale:0)
+            # v0.1.5: do NOT restart on heartbeat-stale-alone. Idle bots that
+            # haven't received a UserPromptSubmit/Stop event in `WATCHDOG_HEARTBEAT_STALE_SECONDS`
+            # produce a stale heartbeat naturally — restarting them was a false
+            # positive. Fall through to Case C (process-alive check) which catches
+            # the actually-stuck-without-pattern scenario.
             log "INFO: heartbeat stale but pane clean — likely idle; deferring to process check"
             ;;
         fresh:1)
