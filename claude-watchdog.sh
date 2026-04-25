@@ -36,6 +36,9 @@ Environment variables (all optional):
     WATCHDOG_COOLDOWN                     min seconds between restarts (default: 300)
     WATCHDOG_PATH                         PATH override for subprocesses
     WATCHDOG_CLAUDE_CMD                   command used to (re)start Claude in tmux
+    WATCHDOG_ALERT_CMD                    shell expression invoked on alerts
+                                          (receives WATCHDOG_ALERT_TYPE and
+                                          WATCHDOG_ALERT_MSG env vars)
 
 Detection order:
     A. tmux session missing             -> restart
@@ -95,6 +98,7 @@ init_config() {
     CLAUDE_CMD="${WATCHDOG_CLAUDE_CMD:-export PATH=$PATH && claude --dangerously-skip-permissions --channels plugin:telegram@claude-plugins-official --channels plugin:discord@claude-plugins-official}"
 
     HEARTBEAT_FILE="${WATCHDOG_HEARTBEAT_FILE:-}"
+    ALERT_CMD="${WATCHDOG_ALERT_CMD:-}"
     HEARTBEAT_STALE_REQUESTED="${WATCHDOG_HEARTBEAT_STALE_SECONDS:-600}"
     # Safety floor: never trust a stale threshold tighter than ~2 launchd cycles
     # (assumes StartInterval=180). Users can always raise the threshold; floor
@@ -190,6 +194,52 @@ heartbeat_state() {
     fi
 }
 
+# --- Alert state helpers ---
+#
+# Alert flag files live in $LOG_DIR alongside .watchdog-last-restart.
+# Naming:
+#   .watchdog-alert-sent-<key>           — state-based (deleted when state clears)
+#   .watchdog-alert-sent-<key>-YYYYMMDD  — time-based (rolls over at midnight)
+# Caller decides which flavor by passing the bare key or the dated key.
+
+alert_flag_path() {
+    echo "$LOG_DIR/.watchdog-alert-sent-$1"
+}
+
+alert_already_sent() {
+    [ -f "$(alert_flag_path "$1")" ]
+}
+
+mark_alert_sent() {
+    : > "$(alert_flag_path "$1")"
+}
+
+clear_alert_flag() {
+    rm -f "$(alert_flag_path "$1")"
+}
+
+# Emit an alert. Always writes an "ALERT [<type>]: <msg>" line to the log.
+# If $ALERT_CMD is set, invokes it with WATCHDOG_ALERT_TYPE and
+# WATCHDOG_ALERT_MSG env vars. Failures are logged as WARN but do not
+# break the watchdog (alert is best-effort).
+#
+# Args: $1 = type (e.g. cap-reached, not-logged-in)
+#       $2 = human-readable message
+emit_alert() {
+    local type="$1"
+    local msg="$2"
+    log "ALERT [$type]: $msg"
+    if [ -n "$ALERT_CMD" ]; then
+        local out rc
+        out=$(WATCHDOG_ALERT_TYPE="$type" WATCHDOG_ALERT_MSG="$msg" \
+              sh -c "$ALERT_CMD" 2>&1)
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log "WARN: alert command exited $rc: $(echo "$out" | head -3 | tr '\n' ' ')"
+        fi
+    fi
+}
+
 # Echoes "yes:<matched_pattern>" or "no:" based on whether $1 (pane content)
 # matches any RESTART_PATTERNS entry. RESTART_PATTERNS are interactive prompts
 # the supervisor must restart out of (rate limit, trust dialog, etc.).
@@ -282,6 +332,7 @@ WATCHDOG_HEARTBEAT_STALE_SECONDS=$HEARTBEAT_STALE_SECONDS (requested=$HEARTBEAT_
 WATCHDOG_COOLDOWN=$COOLDOWN_SECONDS
 WATCHDOG_PATH=$PATH
 WATCHDOG_CLAUDE_CMD=$CLAUDE_CMD
+WATCHDOG_ALERT_CMD=${ALERT_CMD:-(unset, log-only)}
 LOG_FILE=$LOG_FILE
 COOLDOWN_FILE=$COOLDOWN_FILE
 EOF
