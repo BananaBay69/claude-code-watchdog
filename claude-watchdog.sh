@@ -190,6 +190,43 @@ heartbeat_state() {
     fi
 }
 
+# Echoes "yes:<matched_pattern>" or "no:" based on whether $1 (pane content)
+# matches any RESTART_PATTERNS entry. RESTART_PATTERNS are interactive prompts
+# the supervisor must restart out of (rate limit, trust dialog, etc.).
+detect_restart_pattern() {
+    local pane="$1"
+    local pat
+    pat=$(IFS='|'; echo "${RESTART_PATTERNS[*]}")
+    if echo "$pane" | grep -qE "$pat"; then
+        echo "yes:$(echo "$pane" | grep -oE "$pat" | head -1)"
+    else
+        echo "no:"
+    fi
+}
+
+# Echoes "yes:<matched_pattern>" or "no:" based on whether $1 (pane content)
+# matches any TERMINAL_PATTERNS entry. TERMINAL_PATTERNS indicate states
+# restart cannot recover from (e.g. logged out — needs interactive /login).
+# Result is consumed by main() to emit an alert without restarting.
+detect_terminal_state() {
+    local pane="$1"
+    local pat
+    if [ "${#TERMINAL_PATTERNS[@]}" -eq 0 ]; then
+        echo "no:"
+        return
+    fi
+    pat=$(IFS='|'; echo "${TERMINAL_PATTERNS[*]}")
+    if [ -z "$pat" ]; then
+        echo "no:"
+        return
+    fi
+    if echo "$pane" | grep -qE "$pat"; then
+        echo "yes:$(echo "$pane" | grep -oE "$pat" | head -1)"
+    else
+        echo "no:"
+    fi
+}
+
 setup_logging() {
     mkdir -p "$LOG_DIR"
     # Log rotation: keep last 500 lines if > 1MB
@@ -199,9 +236,11 @@ setup_logging() {
     fi
 }
 
-# --- Stuck patterns ---
+# --- Pattern lists ---
 
-STUCK_PATTERNS=(
+# RESTART_PATTERNS: pane content that warrants a kill+restart (interactive
+# prompts the supervisor must clear).
+RESTART_PATTERNS=(
     "rate-limit-options"
     "Enter to confirm.*Esc to cancel"
     "Yes, I trust this folder"
@@ -210,7 +249,10 @@ STUCK_PATTERNS=(
     "Press Enter to continue"
     "Do you trust the files"
 )
-PATTERN=$(IFS='|'; echo "${STUCK_PATTERNS[*]}")
+
+# TERMINAL_PATTERNS: pane content that indicates an unrecoverable state where
+# restart cannot help (e.g. OAuth invalidated). Populated in v0.1.6 Task 4.
+TERMINAL_PATTERNS=()
 
 # --- Main ---
 
@@ -261,11 +303,13 @@ EOF
     # (primary when enabled) and pane-scrape grep (cross-check / fallback).
     PANE_OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -50)
 
-    GREP_MATCHED=0
-    MATCHED=""
-    if echo "$PANE_OUTPUT" | grep -qE "$PATTERN"; then
+    RESTART_MATCH=$(detect_restart_pattern "$PANE_OUTPUT")
+    if [ "${RESTART_MATCH%%:*}" = "yes" ]; then
         GREP_MATCHED=1
-        MATCHED=$(echo "$PANE_OUTPUT" | grep -oE "$PATTERN" | head -1)
+        MATCHED="${RESTART_MATCH#*:}"
+    else
+        GREP_MATCHED=0
+        MATCHED=""
     fi
 
     HB_STATE=$(heartbeat_state)
