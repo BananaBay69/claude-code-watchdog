@@ -201,6 +201,11 @@ heartbeat_state() {
 #   .watchdog-alert-sent-<key>           — state-based (deleted when state clears)
 #   .watchdog-alert-sent-<key>-YYYYMMDD  — time-based (rolls over at midnight)
 # Caller decides which flavor by passing the bare key or the dated key.
+#
+# Callers must ensure $LOG_DIR exists before mark_alert_sent (e.g. via
+# setup_logging). In production, main() calls setup_logging() first.
+# Unit tests should call setup_logging() or `mkdir -p "$LOG_DIR"` in
+# their setup.
 
 alert_flag_path() {
     echo "$LOG_DIR/.watchdog-alert-sent-$1"
@@ -222,6 +227,9 @@ clear_alert_flag() {
 # If $ALERT_CMD is set, invokes it with WATCHDOG_ALERT_TYPE and
 # WATCHDOG_ALERT_MSG env vars. Failures are logged as WARN but do not
 # break the watchdog (alert is best-effort).
+# Args are passed via env vars (not $1/$2) so user's ALERT_CMD can use them
+# in constructs like `--data-urlencode "text=$WATCHDOG_ALERT_MSG"` without
+# shell-escape gymnastics. This is part of the v0.1.6 public alert contract.
 #
 # Args: $1 = type (e.g. cap-reached, not-logged-in)
 #       $2 = human-readable message
@@ -230,12 +238,21 @@ emit_alert() {
     local msg="$2"
     log "ALERT [$type]: $msg"
     if [ -n "$ALERT_CMD" ]; then
-        local out rc
+        local out rc=0
+        # Capture exit code via `|| rc=$?` so `set -e` doesn't abort when the
+        # user's ALERT_CMD fails. Alert delivery is best-effort and must not
+        # break the watchdog tick.
         out=$(WATCHDOG_ALERT_TYPE="$type" WATCHDOG_ALERT_MSG="$msg" \
-              sh -c "$ALERT_CMD" 2>&1)
-        rc=$?
+              sh -c "$ALERT_CMD" 2>&1) || rc=$?
         if [ "$rc" -ne 0 ]; then
-            log "WARN: alert command exited $rc: $(echo "$out" | head -3 | tr '\n' ' ')"
+            local snippet
+            snippet=$(echo "$out" | head -3 | tr '\n' ' ')
+            snippet="${snippet% }"
+            if [ -n "$snippet" ]; then
+                log "WARN: alert command exited $rc: $snippet"
+            else
+                log "WARN: alert command exited $rc (no output)"
+            fi
         fi
     fi
 }
