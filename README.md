@@ -244,6 +244,31 @@ when the symptom disappears, so future re-entry triggers a fresh alert.
 State file: `$LOG_DIR/.watchdog-alert-sent-not-logged-in` (no date
 suffix — state-based, not time-based).
 
+### Silent-loop detection (v0.1.7+, opt-in)
+
+Detects when an active bot is consuming incoming channel messages but not producing outbound replies — a "silent loop" caused by SKILL.md instruction-leak or similar logic bugs that restart cannot fix.
+
+**Enable:**
+
+```bash
+WATCHDOG_SILENT_LOOP_ENABLED=1
+```
+
+**Tunables:**
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `WATCHDOG_OUTBOUND_FILE` | `$HOME/.claude/watchdog/outbound` | Outbound timestamp file (written by bananabay-watchdog plugin v0.2.0+) |
+| `WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD` | `2` | Min `← telegram · CHATID:` lines in pane to consider |
+| `WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS` | `600` | How long without outbound reply before flagging (subject to ~390s safety floor) |
+| `WATCHDOG_SILENT_LOOP_PANE_LINES` | `200` | Pane lines to scan |
+
+**Requires:** `bananabay-watchdog` plugin v0.2.0+ to be installed and writing `$WATCHDOG_OUTBOUND_FILE`. If the file is missing, silent-loop check no-ops (logs `no-outbound-signal`).
+
+**Alert behavior:** Emits `WATCHDOG_ALERT_TYPE=silent-loop`. **Never restarts** — root cause is typically SKILL.md leak that restart re-enters. Operator must inspect pane and address upstream.
+
+**Currently scoped to Telegram channel** (`mcp__telegram__reply` tool). Discord support tracked separately.
+
 ## Alert protocol (v0.1.6+)
 
 Alerts are pluggable via the `WATCHDOG_ALERT_CMD` env var:
