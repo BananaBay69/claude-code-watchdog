@@ -22,6 +22,7 @@ assert_eq 3600 "$(effective_cooldown 10)" "10 >= 10 → throttled"
 assert_eq 3600 "$(effective_cooldown 99)" "99 >= 10 → throttled"
 
 # CAP=0 → always normal
+# shellcheck disable=SC2034  # consumed by effective_cooldown via the sourced script
 DAILY_RESTART_CAP=0
 assert_eq 300 "$(effective_cooldown 0)" "cap=0 → normal"
 assert_eq 300 "$(effective_cooldown 100)" "cap=0 → normal even at 100"
