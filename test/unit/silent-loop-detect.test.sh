@@ -19,11 +19,13 @@ WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS=600 \
 mkdir -p "$LOG_DIR"
 
 # Case 1: enabled=0 → always "no:disabled" regardless of inputs
+# shellcheck disable=SC2034  # consumed by detect_silent_loop via the sourced script
 SILENT_LOOP_ENABLED=0
 result=$(detect_silent_loop 5 stale)
 [ "${result%%:*}" = "no" ] || { echo "FAIL case1 yes/no: $result"; exit 1; }
 
 # Case 2: enabled=1 + incoming below threshold → no:below-threshold
+# shellcheck disable=SC2034  # consumed by detect_silent_loop via the sourced script
 SILENT_LOOP_ENABLED=1
 result=$(detect_silent_loop 1 stale)
 [ "${result%%:*}" = "no" ] || { echo "FAIL case2: $result"; exit 1; }
