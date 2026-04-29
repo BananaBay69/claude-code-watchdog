@@ -681,10 +681,16 @@ EOF
         MATCHED=""
     fi
 
-    # Terminal-state branch: orthogonal to restart logic. If we detect a
-    # state restart cannot recover from (e.g. Not logged in), emit a
-    # one-shot alert and let the user fix it manually. Dedup via flag file
-    # that's cleared when the symptom disappears.
+    # Terminal-state branch: if we detect a state restart cannot recover
+    # from (e.g. Not logged in), emit a one-shot alert and skip the
+    # restart/process-alive branches below. The two branches were
+    # originally orthogonal, but a pane that simultaneously shows a
+    # restart pattern (rate-limit prompt, 401 error) and a terminal
+    # pattern would emit "Restart cannot fix" and then immediately
+    # restart anyway — alert and behaviour contradicting each other
+    # (issue #25). When terminal state is present, the alert message is
+    # the source of truth: stay silent on the restart path until the
+    # user clears the symptom.
     TERMINAL_MATCH=$(detect_terminal_state "$PANE_OUTPUT")
     if [ "${TERMINAL_MATCH%%:*}" = "yes" ]; then
         if ! alert_already_sent not-logged-in; then
@@ -695,11 +701,13 @@ EOF
         else
             log "INFO: terminal-state '${TERMINAL_MATCH#*:}' still present (alert already sent — silent until cleared)"
         fi
+        TERMINAL_LOCK=1
     else
         if alert_already_sent not-logged-in; then
             log "INFO: terminal-state cleared — removing alert flag"
             clear_alert_flag not-logged-in
         fi
+        TERMINAL_LOCK=0
     fi
 
     HB_STATE=$(heartbeat_state)
@@ -733,6 +741,17 @@ EOF
             : # grep-only, clean, fall through to Case C
             ;;
     esac
+
+    # Issue #25: terminal state already emitted "Restart cannot fix" — do
+    # not contradict it by restarting (matched-restart case) or by
+    # restarting on a dead claude process (which won't recover from
+    # not-logged-in either; the user has to /login interactively).
+    if [ "$TERMINAL_LOCK" -eq 1 ]; then
+        if [ "$SHOULD_RESTART" -eq 1 ]; then
+            log "INFO: restart pattern '$MATCHED' present alongside terminal state '${TERMINAL_MATCH#*:}'; suppressing restart (terminal alert is source of truth)"
+        fi
+        return 0
+    fi
 
     if [ "$SHOULD_RESTART" -eq 1 ]; then
         attempt_restart
