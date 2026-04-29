@@ -3,3 +3,6 @@
 communications/
 .claude/
 *.code-workspace
+NOTES.md
+.spectra/
+openspec/.vector-search.db*
