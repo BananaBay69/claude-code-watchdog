@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WATCHDOG_VERSION="0.1.7"
+WATCHDOG_VERSION="0.1.9"
 
 # --- CLI flag parsing ---
 # parse_args() handles --help / --version / --show-config / --config <file>.
@@ -14,6 +14,7 @@ SHOW_CONFIG=0
 CONFIG_FILE=""
 DO_RESET=0
 SHOW_STATUS=0
+DO_SNAPSHOT=0
 
 parse_args() {
     while [ "$#" -gt 0 ]; do
@@ -30,6 +31,7 @@ Usage:
     claude-watchdog.sh --config <file>    Source experimental config file then exit 0
     claude-watchdog.sh --reset            Clear today's counter + alert flags (post-recovery)
     claude-watchdog.sh --status           Print runtime state (count, flags, cooldown) and exit
+    claude-watchdog.sh --snapshot         Capture a diagnostic snapshot now (independent of detection state)
 
 Environment variables (all optional):
     WATCHDOG_SESSION                      tmux session name (default: claude)
@@ -54,6 +56,16 @@ Environment variables (all optional):
     WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS
                                           outbound stale threshold, seconds (default: 600)
     WATCHDOG_SILENT_LOOP_PANE_LINES       pane lines to scan for incoming (default: 200)
+    WATCHDOG_SILENT_LOOP_RECOVERY         action on silent-loop detection
+                                          (disabled|snapshot-only|soft|aggressive; default: disabled)
+    WATCHDOG_SNAPSHOT_RETAIN_COUNT        max snapshot directories to keep, FIFO (default: 20)
+    WATCHDOG_LOG_LEVEL                    threshold for log() output
+                                          (DEBUG|INFO|WARN|ERROR; default: INFO)
+                                          Lines below threshold are suppressed.
+                                          ALERT [type]: lines bypass threshold (always written).
+                                          Unknown values fall back to INFO with one-time WARN.
+                                          Semantic prefixes map to INFO; ALERT bypasses
+                                          (OK/DETECT/ACTION/COOLDOWN treated as INFO bucket).
 
 Detection order:
     A. tmux session missing             -> restart
@@ -90,11 +102,16 @@ USAGE
                 SHOW_STATUS=1
                 shift
                 ;;
+            --snapshot)
+                DO_SNAPSHOT=1
+                shift
+                ;;
             --)
                 shift
                 break
                 ;;
             *)
+                _log_error_pre_setup "unknown argument '$1'"
                 echo "error: unknown argument '$1' (try --help)" >&2
                 exit 2
                 ;;
@@ -155,6 +172,48 @@ init_config() {
         SILENT_LOOP_OUTBOUND_STALE_SECONDS=$SILENT_LOOP_OUTBOUND_STALE_REQUESTED
     fi
     SILENT_LOOP_PANE_LINES="${WATCHDOG_SILENT_LOOP_PANE_LINES:-200}"
+
+    # v0.1.8: silent-loop recovery dispatch + snapshot retention
+    # Unknown / empty values are tolerated here; the dispatcher emits a WARN
+    # and falls back to disabled. Validation deferred to runtime so config
+    # parsing has no side effects requiring $LOG_DIR.
+    SILENT_LOOP_RECOVERY="${WATCHDOG_SILENT_LOOP_RECOVERY:-disabled}"
+    SNAPSHOT_RETAIN_COUNT="${WATCHDOG_SNAPSHOT_RETAIN_COUNT:-20}"
+    # Floor at 1 — operator who passes 0 or negative would otherwise lose all snapshots
+    if ! [ "$SNAPSHOT_RETAIN_COUNT" -ge 1 ] 2>/dev/null; then
+        SNAPSHOT_RETAIN_COUNT=20
+    fi
+
+    SNAPSHOT_DIR="$LOG_DIR/snapshots"
+
+    # v0.1.9: log level threshold (WATCHDOG_LOG_LEVEL env var only — no CLI flag).
+    # Unknown values resolve to INFO and trigger a one-time WARN at first log() call.
+    # See specs/structured-logging/spec.md for the full prefix-to-level mapping.
+    local _input_level="${WATCHDOG_LOG_LEVEL:-INFO}"
+    LOG_LEVEL_FALLBACK_FROM=""
+    case "$_input_level" in
+        DEBUG)  LOG_LEVEL_THRESHOLD=10; LOG_LEVEL_EFFECTIVE=DEBUG ;;
+        INFO)   LOG_LEVEL_THRESHOLD=20; LOG_LEVEL_EFFECTIVE=INFO ;;
+        WARN)   LOG_LEVEL_THRESHOLD=30; LOG_LEVEL_EFFECTIVE=WARN ;;
+        ERROR)  LOG_LEVEL_THRESHOLD=40; LOG_LEVEL_EFFECTIVE=ERROR ;;
+        *)      LOG_LEVEL_THRESHOLD=20
+                LOG_LEVEL_EFFECTIVE=INFO
+                LOG_LEVEL_FALLBACK_FROM="$_input_level"
+                ;;
+    esac
+    # Reset emit-once flag (re-source / --config re-init scenarios).
+    LOG_LEVEL_FALLBACK_EMITTED=""
+
+    # Detect a `timeout` command for sub-capture wrapping. Coreutils provides
+    # gtimeout on macOS via brew. If neither exists, sub-captures run unwrapped
+    # — acceptable degradation for diagnostic snapshots.
+    if command -v gtimeout >/dev/null 2>&1; then
+        SNAPSHOT_TIMEOUT_CMD="gtimeout"
+    elif command -v timeout >/dev/null 2>&1; then
+        SNAPSHOT_TIMEOUT_CMD="timeout"
+    else
+        SNAPSHOT_TIMEOUT_CMD=""
+    fi
 }
 
 # Top-level: populate globals from current env so sourcing the script works
@@ -164,8 +223,68 @@ init_config
 
 # --- Helpers ---
 
+_log_level_passes() {
+    # Returns 0 if the level passes threshold, 1 if suppressed.
+    # Semantic flavours (OK/DETECT/ACTION/COOLDOWN) map to INFO bucket.
+    local level="$1"
+    local ordinal
+    case "$level" in
+        DEBUG) ordinal=10 ;;
+        INFO|OK|DETECT|ACTION|COOLDOWN) ordinal=20 ;;
+        WARN) ordinal=30 ;;
+        ERROR) ordinal=40 ;;
+        *) ordinal=20 ;;  # unknown → INFO bucket (defensive)
+    esac
+    [ "$ordinal" -ge "$LOG_LEVEL_THRESHOLD" ]
+}
+
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
+    # One-time fallback WARN — emitted before the actual line, ignores threshold.
+    # Operator who typoed WATCHDOG_LOG_LEVEL must always see this notice.
+    if [ -n "${LOG_LEVEL_FALLBACK_FROM:-}" ] && [ -z "${LOG_LEVEL_FALLBACK_EMITTED:-}" ]; then
+        LOG_LEVEL_FALLBACK_EMITTED=1
+        echo "$(date '+%Y-%m-%d %H:%M:%S') WARN: WATCHDOG_LOG_LEVEL='$LOG_LEVEL_FALLBACK_FROM' invalid — falling back to INFO" >> "$LOG_FILE"
+    fi
+
+    local msg="$1"
+    case "$msg" in
+        "ALERT ["*)
+            : # ALERT messages always pass — alert dedup state machine relies on visibility
+            ;;
+        *)
+            local level=INFO
+            # ^[A-Z]+: extracts the leading token; case-sensitive by design.
+            # Lowercase 'alert' or arbitrary text → no match → defaults to INFO.
+            # Use bash regex to avoid pipefail issues from grep returning empty.
+            if [[ "$msg" =~ ^([A-Z]+): ]]; then
+                level="${BASH_REMATCH[1]}"
+            fi
+            _log_level_passes "$level" || return 0
+            ;;
+    esac
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE"
+}
+
+# log_at LEVEL "msg" — explicit-form helper for callers where level is variable.
+# Internally delegates to log() so threshold + ALERT bypass + fallback behave identically.
+log_at() {
+    local level="$1"
+    local msg="$2"
+    log "$level: $msg"
+}
+
+# _log_error_pre_setup — Option A pre-LOG_DIR error mirror.
+# Used by parse_args / config error paths that fire BEFORE setup_logging.
+# init_config (top-level) populates $LOG_DIR; only the directory itself may
+# be missing. We mkdir + append directly without touching log rotation. If
+# mkdir fails (e.g. read-only parent), silently degrade — stderr still has
+# the operator-facing message and exit code is preserved. No regression vs.
+# v0.1.8: stderr-only behaviour is the lower bound, never lost.
+_log_error_pre_setup() {
+    local msg="$1"
+    if mkdir -p "$LOG_DIR" 2>/dev/null; then
+        printf '%s ERROR: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$LOG_FILE" 2>/dev/null || :
+    fi
 }
 
 check_cooldown() {
@@ -185,7 +304,13 @@ check_cooldown() {
 
 start_claude() {
     log "ACTION: Killing tmux session '$TMUX_SESSION'"
-    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    # v0.1.9: don't silently swallow rc; non-zero is expected when session is
+    # already gone (Case A path), but we still want operator visibility.
+    local _kill_rc=0
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || _kill_rc=$?
+    if [ "$_kill_rc" -ne 0 ]; then
+        log "DEBUG: kill-session no-op (rc=$_kill_rc, session likely already gone)"
+    fi
     sleep 2
     log "ACTION: Starting new tmux session '$TMUX_SESSION'"
     # Pin session cwd to $HOME so Claude never inherits launchd's default `/`
@@ -222,7 +347,14 @@ heartbeat_state() {
     schema=""
     hb_ts=""
     # shellcheck disable=SC2162
-    read schema hb_ts _rest < "$HEARTBEAT_FILE" 2>/dev/null || true
+    # v0.1.9: distinguish read failure (I/O / permissions) from malformed schema
+    # (handled in the next branch). Read failure deserves a WARN — operator may
+    # need to fix file permissions.
+    if ! read schema hb_ts _rest < "$HEARTBEAT_FILE" 2>/dev/null; then
+        log "WARN: heartbeat read failed (file exists but I/O error or permission denied): $HEARTBEAT_FILE"
+        echo "stale"
+        return
+    fi
     if [ "$schema" != "1" ]; then
         log "WARN: heartbeat unsupported schema '$schema' in $HEARTBEAT_FILE — treating as stale"
         echo "stale"
@@ -264,7 +396,12 @@ outbound_state() {
     schema=""
     ob_ts=""
     # shellcheck disable=SC2162
-    read schema ob_ts _rest < "$OUTBOUND_FILE" 2>/dev/null || true
+    # v0.1.9: same I/O-vs-malformed split as heartbeat_state.
+    if ! read schema ob_ts _rest < "$OUTBOUND_FILE" 2>/dev/null; then
+        log "WARN: outbound read failed (file exists but I/O error or permission denied): $OUTBOUND_FILE"
+        echo "stale"
+        return
+    fi
     if [ "$schema" != "1" ]; then
         log "WARN: outbound unsupported schema '$schema' in $OUTBOUND_FILE — treating as stale"
         echo "stale"
@@ -381,8 +518,14 @@ read_restart_count() {
     f=$(restart_count_file)
     if [ -f "$f" ]; then
         # Tolerate empty/non-numeric content; treat as 0.
-        local v
-        v=$(cat "$f" 2>/dev/null || echo 0)
+        # v0.1.9: distinguish "file unreadable" (perm error → WARN) from
+        # "file empty" (legit edge case → silent fall-through to 0).
+        local v _cat_rc=0
+        v=$(cat "$f" 2>/dev/null) || _cat_rc=$?
+        if [ "$_cat_rc" -ne 0 ]; then
+            log "WARN: restart-count file unreadable (rc=$_cat_rc, treating as 0): $f"
+            v=0
+        fi
         if [[ "$v" =~ ^[0-9]+$ ]]; then
             echo "$v"
         else
@@ -454,6 +597,10 @@ do_reset() {
     if [ "$removed" -eq 0 ]; then
         echo "no state files to remove"
     fi
+    # v0.1.9: audit log — operator state-mutating intervention.
+    # setup_logging ensures LOG_DIR exists for the log() append.
+    setup_logging
+    log "INFO: operator: --reset (cleared $removed flags)"
 }
 
 show_status() {
@@ -583,6 +730,195 @@ setup_logging() {
     fi
 }
 
+# --- v0.1.8: snapshot capture + retention + recovery dispatch ---
+#
+# take_snapshot creates a directory under $SNAPSHOT_DIR with diagnostic files
+# (pane content, watchdog status, env, recent log, active SKILL.md mtimes,
+# metadata.json). Each sub-capture is wrapped by `_snapshot_capture` which
+# applies a 5-second timeout when available and tolerates partial failure
+# (logs WARN, removes the failed file, continues with remaining captures).
+# Echoes the absolute snapshot directory path on stdout. Returns 0 even if
+# some sub-captures failed (partial-snapshot semantics); returns non-zero
+# only when the snapshot directory itself cannot be created.
+
+_snapshot_capture() {
+    # Args: $1=outfile $2=display_name $3..=command [args...]
+    local outfile="$1" name="$2" rc=0
+    shift 2
+    if [ -n "${SNAPSHOT_TIMEOUT_CMD:-}" ]; then
+        "$SNAPSHOT_TIMEOUT_CMD" 5 "$@" > "$outfile" 2>&1 || rc=$?
+    else
+        "$@" > "$outfile" 2>&1 || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        # v0.1.9: include first ~3 lines of captured stderr so operator can
+        # diagnose without re-running. Reuses emit_alert's snippet pattern.
+        local snippet=""
+        if [ -s "$outfile" ]; then
+            snippet=$(head -3 "$outfile" | tr '\n' ' ')
+            snippet="${snippet% }"
+        fi
+        if [ -n "$snippet" ]; then
+            log "WARN: snapshot $name failed (exit=$rc): $snippet"
+        else
+            log "WARN: snapshot $name failed (exit=$rc, no stderr captured)"
+        fi
+        rm -f "$outfile"
+        return 1
+    fi
+    return 0
+}
+
+# prune_old_snapshots removes oldest silent-loop-* directories under
+# $SNAPSHOT_DIR until at most $SNAPSHOT_RETAIN_COUNT - 1 remain, leaving
+# room for one new snapshot. Sorts by directory name (timestamp-sortable).
+# No-op if the snapshots dir does not yet exist.
+prune_old_snapshots() {
+    [ -d "$SNAPSHOT_DIR" ] || return 0
+    local target=$(( SNAPSHOT_RETAIN_COUNT - 1 ))
+    [ "$target" -lt 0 ] && target=0
+    # List existing snapshot dirs sorted oldest-first
+    # shellcheck disable=SC2207
+    local dirs=( $(find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -type d -name 'silent-loop-*' 2>/dev/null | sort) )
+    local count=${#dirs[@]}
+    while [ "$count" -gt "$target" ]; do
+        local oldest="${dirs[0]}"
+        # Defensive: never rm outside $SNAPSHOT_DIR (case "$oldest" must start with $SNAPSHOT_DIR/silent-loop-)
+        case "$oldest" in
+            "$SNAPSHOT_DIR/silent-loop-"*)
+                rm -rf "$oldest"
+                ;;
+            *)
+                log "WARN: prune_old_snapshots refused to remove unexpected path: $oldest"
+                ;;
+        esac
+        dirs=( "${dirs[@]:1}" )
+        count=${#dirs[@]}
+    done
+}
+
+# take_snapshot [incoming=0]
+# Creates one snapshot directory; echoes absolute path on stdout.
+take_snapshot() {
+    local incoming="${1:-0}"
+    local ts dir captured_at outbound_age
+
+    prune_old_snapshots
+
+    ts=$(date '+%Y%m%d%H%M%S')
+    dir="$SNAPSHOT_DIR/silent-loop-$ts"
+
+    if ! mkdir -p "$dir"; then
+        log "ERROR: snapshot mkdir failed: $dir"
+        return 1
+    fi
+
+    captured_at=$(date '+%Y-%m-%dT%H:%M:%S%z')
+
+    # Compute outbound age in seconds (0 if file missing/disabled/malformed).
+    outbound_age=0
+    if [ -n "${OUTBOUND_FILE:-}" ] && [ -f "$OUTBOUND_FILE" ]; then
+        local schema ob_ts _rest now mtime_age
+        # Best-effort parse of "1 <unix_ts>\n" schema; fall back to mtime.
+        # shellcheck disable=SC2034
+        if read -r schema ob_ts _rest < "$OUTBOUND_FILE" 2>/dev/null && \
+           [ "$schema" = "1" ] && \
+           [ "$ob_ts" -eq "$ob_ts" ] 2>/dev/null; then
+            now=$(date +%s)
+            outbound_age=$(( now - ob_ts ))
+            [ "$outbound_age" -lt 0 ] && outbound_age=0
+        else
+            # Fall back to file mtime
+            now=$(date +%s)
+            mtime_age=$(stat -f%m "$OUTBOUND_FILE" 2>/dev/null || echo "$now")
+            outbound_age=$(( now - mtime_age ))
+            [ "$outbound_age" -lt 0 ] && outbound_age=0
+        fi
+    fi
+
+    # pane.txt: full pane history (last 2000 lines)
+    _snapshot_capture "$dir/pane.txt" "pane.txt" \
+        tmux capture-pane -t "$TMUX_SESSION" -p -S -2000 || true
+
+    # status.txt: re-invoke this script with --status. ${BASH_SOURCE[0]:-$0}
+    # works under both `bash script.sh` and `. script.sh` execution.
+    local self="${BASH_SOURCE[0]:-$0}"
+    _snapshot_capture "$dir/status.txt" "status.txt" \
+        bash "$self" --status || true
+
+    # env.txt: WATCHDOG_* env, tmux ls, pgrep claude
+    {
+        env | grep '^WATCHDOG_' | sort
+        echo "---"
+        echo "# tmux ls"
+        tmux ls 2>&1 || true
+        echo "---"
+        echo "# pgrep -lf claude"
+        pgrep -lf claude 2>&1 || true
+    } > "$dir/env.txt" 2>&1 || log "WARN: snapshot env.txt failed"
+
+    # recent-log.txt: last 200 lines of watchdog log
+    if [ -f "$LOG_FILE" ]; then
+        tail -200 "$LOG_FILE" > "$dir/recent-log.txt" 2>/dev/null || \
+            log "WARN: snapshot recent-log.txt failed"
+    else
+        : > "$dir/recent-log.txt"
+    fi
+
+    # active-skills.txt: list ~/.claude/plugins/**/skills/*.md path + ISO mtime.
+    # NEVER include file content (may be large or contain secrets).
+    {
+        if [ -d "$HOME/.claude/plugins" ]; then
+            find "$HOME/.claude/plugins" -path '*/skills/*.md' -type f 2>/dev/null \
+                | while IFS= read -r f; do
+                    local mt
+                    mt=$(stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%S%z' "$f" 2>/dev/null || echo "?")
+                    printf '%s\t%s\n' "$mt" "$f"
+                done | sort -r
+        fi
+    } > "$dir/active-skills.txt" 2>&1 || log "WARN: snapshot active-skills.txt failed"
+
+    # metadata.json: hand-built (jq optional, may not be installed)
+    cat > "$dir/metadata.json" <<METAJSON
+{
+  "captured_at": "$captured_at",
+  "silent_loop_state": {
+    "incoming": $incoming,
+    "outbound_age_seconds": $outbound_age
+  },
+  "watchdog_version": "$WATCHDOG_VERSION"
+}
+METAJSON
+
+    echo "$dir"
+    return 0
+}
+
+# recovery_driver dispatches silent-loop recovery action based on
+# $SILENT_LOOP_RECOVERY. Echoes snapshot path on stdout when a snapshot
+# is taken (snapshot-only mode); echoes empty otherwise.
+# Args: $1 = incoming count
+recovery_driver() {
+    local incoming="${1:-0}"
+    case "$SILENT_LOOP_RECOVERY" in
+        snapshot-only)
+            take_snapshot "$incoming"
+            ;;
+        soft)
+            log "WARN: soft mode requested but not implemented"
+            ;;
+        aggressive)
+            log "WARN: aggressive mode requested but not implemented"
+            ;;
+        disabled|"")
+            : # no-op
+            ;;
+        *)
+            log "WARN: unknown WATCHDOG_SILENT_LOOP_RECOVERY value '$SILENT_LOOP_RECOVERY' — falling back to disabled"
+            ;;
+    esac
+}
+
 # --- Pattern lists ---
 
 # RESTART_PATTERNS: pane content that warrants a kill+restart (interactive
@@ -614,6 +950,7 @@ main() {
     # then re-run init_config so WATCHDOG_* values from the file take effect.
     if [ -n "$CONFIG_FILE" ]; then
         if [ ! -f "$CONFIG_FILE" ]; then
+            _log_error_pre_setup "config file not found: $CONFIG_FILE"
             echo "error: --config file not found: $CONFIG_FILE" >&2
             exit 2
         fi
@@ -631,6 +968,22 @@ main() {
     if [ "$SHOW_STATUS" -eq 1 ]; then
         show_status
         exit 0
+    fi
+
+    # --snapshot: manual diagnostic capture, independent of detection state.
+    # MUST NOT consult or modify the alert dedup flag. Sets up logging first
+    # so take_snapshot's WARN lines (if any) land in the watchdog log.
+    if [ "$DO_SNAPSHOT" -eq 1 ]; then
+        setup_logging
+        local _snap_path
+        if _snap_path=$(take_snapshot 0); then
+            # v0.1.9: audit log — operator artifact-creating intervention.
+            log "INFO: operator: --snapshot (path: $_snap_path)"
+            exit 0
+        else
+            log "ERROR: operator: --snapshot failed"
+            exit 1
+        fi
     fi
 
     # --show-config exits before any side-effects
@@ -652,6 +1005,7 @@ WATCHDOG_OUTBOUND_FILE=$OUTBOUND_FILE
 WATCHDOG_SILENT_LOOP_INCOMING_THRESHOLD=$SILENT_LOOP_INCOMING_THRESHOLD
 WATCHDOG_SILENT_LOOP_OUTBOUND_STALE_SECONDS=$SILENT_LOOP_OUTBOUND_STALE_SECONDS (requested=$SILENT_LOOP_OUTBOUND_STALE_REQUESTED, floor=$HEARTBEAT_STALE_FLOOR)
 WATCHDOG_SILENT_LOOP_PANE_LINES=$SILENT_LOOP_PANE_LINES
+WATCHDOG_LOG_LEVEL=$LOG_LEVEL_EFFECTIVE${LOG_LEVEL_FALLBACK_FROM:+ (requested='$LOG_LEVEL_FALLBACK_FROM' invalid → fell back to INFO)}
 RESTART_COUNT_TODAY=$(read_restart_count)
 LOG_FILE=$LOG_FILE
 COOLDOWN_FILE=$COOLDOWN_FILE
@@ -756,8 +1110,15 @@ EOF
     SILENT_RESULT=$(detect_silent_loop "$INCOMING_COUNT" "$OB_STATE")
     if [ "${SILENT_RESULT%%:*}" = "yes" ]; then
         if ! alert_already_sent silent-loop; then
-            local silent_msg
+            local silent_msg snapshot_path
             silent_msg="Silent loop detected: ${SILENT_RESULT#*:}. Bot pane shows incoming channel messages but no outbound reply within ${SILENT_LOOP_OUTBOUND_STALE_SECONDS}s. Restart will NOT fix (root cause typically SKILL.md instruction-leak). Recovery: ssh into host, tmux capture-pane -t $TMUX_SESSION, inspect skill behavior."
+            # v0.1.8: invoke recovery dispatcher; snapshot-only mode echoes
+            # snapshot dir on stdout. Append to alert msg only when a snapshot
+            # was actually produced (not for disabled/soft/aggressive/unknown).
+            snapshot_path=$(recovery_driver "$INCOMING_COUNT")
+            if [ -n "$snapshot_path" ]; then
+                silent_msg="$silent_msg Snapshot: $snapshot_path"
+            fi
             emit_alert silent-loop "$silent_msg"
             mark_alert_sent silent-loop
         else

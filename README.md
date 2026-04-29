@@ -194,6 +194,50 @@ All settings can be overridden via environment variables (the installer writes t
 | `WATCHDOG_DAILY_RESTART_CAP` | `10` | Daily restart cap; `0` = disabled |
 | `WATCHDOG_THROTTLED_COOLDOWN` | `3600` | Cooldown after cap (subject to safety floor) |
 | `WATCHDOG_ALERT_CMD` | *(unset)* | Shell expression invoked on alerts (see "Alert protocol") |
+| `WATCHDOG_LOG_LEVEL` | `INFO` | Threshold for `claude-watchdog.log` output. `DEBUG` / `INFO` / `WARN` / `ERROR`. See "Log levels and audit logging". |
+
+## Log levels and audit logging (v0.1.9+)
+
+`WATCHDOG_LOG_LEVEL` filters lines below the chosen severity. Default `INFO` matches v0.1.8 behaviour exactly (no migration needed). Set `DEBUG` during incident triage; revert when done.
+
+**Prefix → level mapping** (`log()` parses the leading `^[A-Z]+:` token of each message):
+
+| Prefix         | Mapped Level | Notes |
+|----------------|--------------|-------|
+| `DEBUG:`       | DEBUG (10)   | Suppressed at default INFO threshold |
+| `INFO:`        | INFO (20)    | |
+| `OK:`          | INFO (20)    | Semantic flavour — "what kind of event" |
+| `DETECT:`      | INFO (20)    | Semantic flavour |
+| `ACTION:`      | INFO (20)    | Semantic flavour |
+| `COOLDOWN:`    | INFO (20)    | Semantic flavour |
+| `WARN:`        | WARN (30)    | |
+| `ERROR:`       | ERROR (40)   | |
+| `ALERT [...]:` | **bypass**   | Always written regardless of threshold (alert dedup state machine relies on this) |
+| (no prefix)    | INFO (20)    | Safe default |
+
+Unknown values fall back to `INFO` and emit one `WARN: WATCHDOG_LOG_LEVEL='<value>' invalid` line at first call.
+
+**Operator interventions are now audit-logged** (v0.1.9+):
+
+```text
+2026-04-29 14:32:01 INFO: operator: --reset (cleared 3 flags)
+2026-04-29 16:05:18 INFO: operator: --snapshot (path: /Users/x/.claude/watchdog/logs/snapshots/silent-loop-20260429160517/)
+2026-04-29 18:00:00 ERROR: unknown argument '--xyz'
+```
+
+Read-only invocations (`--help`, `--version`, `--show-config`, `--status`) leave no log line — they're informational queries, not events.
+
+**Extract just the audit trail:**
+
+```bash
+grep "operator:\|ERROR: " ~/.claude/watchdog/logs/claude-watchdog.log
+```
+
+**Run the daemon ad-hoc with verbose logging** (without changing plist):
+
+```bash
+WATCHDOG_LOG_LEVEL=DEBUG bash ~/bin/claude-watchdog.sh
+```
 
 ## Restart cap (v0.1.6+)
 
@@ -268,6 +312,51 @@ WATCHDOG_SILENT_LOOP_ENABLED=1
 **Alert behavior:** Emits `WATCHDOG_ALERT_TYPE=silent-loop`. **Never restarts** — root cause is typically SKILL.md leak that restart re-enters. Operator must inspect pane and address upstream.
 
 **Currently scoped to Telegram channel** (`mcp__telegram__reply` tool). Discord support tracked separately.
+
+### Silent-loop recovery dispatch (v0.1.8+, opt-in)
+
+v0.1.7 alerts on silent-loop but the operator still has to `ssh` in and `tmux capture-pane` to triage. v0.1.8 adds a `WATCHDOG_SILENT_LOOP_RECOVERY` mode that selects what happens after detection:
+
+| Mode             | Behavior                                                                                                          |
+|------------------|-------------------------------------------------------------------------------------------------------------------|
+| `disabled` (default) | Alert only. Identical to v0.1.7.                                                                              |
+| `snapshot-only`  | Alert + write a diagnostic snapshot directory. Alert message includes the snapshot path. Recommended for production. |
+| `soft`           | (stub — logs `WARN: soft mode requested but not implemented`)                                                     |
+| `aggressive`     | (stub — logs `WARN: aggressive mode requested but not implemented`)                                               |
+
+`soft` and `aggressive` are reserved enum values for future PRs (see issue #15 closing comment). Unknown values fall back to `disabled` and log a `WARN`.
+
+**Tunables:**
+
+| Env var                          | Default    | Purpose                                                            |
+|----------------------------------|------------|--------------------------------------------------------------------|
+| `WATCHDOG_SILENT_LOOP_RECOVERY`  | `disabled` | Dispatch mode (above)                                              |
+| `WATCHDOG_SNAPSHOT_RETAIN_COUNT` | `20`       | Max snapshot directories kept under `$LOG_DIR/snapshots/`, FIFO    |
+
+**Snapshot triggering** piggybacks on the existing alert dedup flag — one snapshot per silent-loop *state-entry*, not per tick. After `outbound` advances and clears the flag, a re-entry produces a new snapshot.
+
+**Snapshot directory contents** (`$LOG_DIR/snapshots/silent-loop-YYYYMMDDhhmmss/`):
+
+| File                | Source                                                                                                  |
+|---------------------|---------------------------------------------------------------------------------------------------------|
+| `pane.txt`          | `tmux capture-pane -p -S -2000`                                                                         |
+| `status.txt`        | `claude-watchdog.sh --status`                                                                           |
+| `env.txt`           | `WATCHDOG_*` env vars + `tmux ls` + `pgrep -lf claude`                                                  |
+| `recent-log.txt`    | last 200 lines of `claude-watchdog.log`                                                                 |
+| `active-skills.txt` | path + ISO 8601 mtime for every `~/.claude/plugins/**/skills/*.md` (no content — may contain secrets)   |
+| `metadata.json`     | `{captured_at, silent_loop_state: {incoming, outbound_age_seconds}, watchdog_version}`                  |
+
+**Manual capture:** `claude-watchdog.sh --snapshot` writes a snapshot regardless of detection state. The alert dedup flag is *not* consulted or modified — useful for ad-hoc diagnostics.
+
+**Privacy warning:** `pane.txt` may contain user messages, tokens, or other sensitive content from the bot's conversation history. Treat snapshot directories as sensitive. Default retention of 20 caps disk use at ~10 MB worst case (each snapshot ~500 KB max).
+
+**Triage flow** (when you receive a `silent-loop` alert):
+
+1. Open `metadata.json` — confirm `incoming > 0` and `outbound_age_seconds` is large
+2. Open `pane.txt` — look at the bot's last few turns. Is it running tools (e.g. `check-reply`) but never sending messages? → SKILL.md leak (restart won't fix; fix the SKILL.md)
+3. If `pane.txt` shows nothing recent → could be transient state (Claude itself stuck). Manual restart may help: `tmux send-keys -t claude C-c` then re-launch
+4. Open `active-skills.txt` — sort by mtime; recently modified SKILL.md is the leading suspect for instruction-leak
+5. Open `recent-log.txt` — confirm watchdog itself is healthy (no daemon-side WARNs)
 
 ## Alert protocol (v0.1.6+)
 
