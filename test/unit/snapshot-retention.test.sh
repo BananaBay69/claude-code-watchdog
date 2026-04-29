@@ -68,6 +68,7 @@ remain=$(find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' 
 # === Case 3: prune_old_snapshots ignores non-snapshot directories ===
 rm -rf "$SNAPSHOT_DIR"
 mkdir -p "$SNAPSHOT_DIR"
+# shellcheck disable=SC2034  # consumed by prune_old_snapshots via the sourced script
 SNAPSHOT_RETAIN_COUNT=1
 
 mkdir -p \
