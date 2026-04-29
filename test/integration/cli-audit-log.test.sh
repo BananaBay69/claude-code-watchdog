@@ -80,6 +80,7 @@ LOGDIR4="$TMPDIR/logs4"
 mkdir -p "$LOGDIR4"
 stderr4=$(run_wd "$LOGDIR4" --config /nonexistent/path/to/config 2>&1 1>/dev/null) && rc=0 || rc=$?
 [ "$rc" = "2" ] || { echo "FAIL case4: expected exit 2, got $rc"; exit 1; }
+echo "$stderr4" | grep -q "config file not found" || { echo "FAIL case4: stderr missing 'config file not found' message"; echo "stderr: $stderr4"; exit 1; }
 assert_file_contains "$LOGDIR4/claude-watchdog.log" "ERROR: config file not found" \
     "case4: --config <missing> must mirror to main log as ERROR"
 
