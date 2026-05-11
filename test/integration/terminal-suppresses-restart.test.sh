@@ -47,7 +47,7 @@ run_watchdog
 assert_file_exists "$LOG_DIR/.watchdog-alert-sent-not-logged-in" "terminal flag should be created"
 assert_file_contains "$TEST_DIR/alert.log" "FIRED not-logged-in" "terminal alert fires"
 
-# Restart MUST NOT happen — i.e., no kill-session / new-session in the tmux
+# Restart MUST NOT happen, i.e., no kill-session / new-session in the tmux
 # command log. (mock-tmux logs every invocation when MOCK_TMUX_LOG is set.)
 assert_file_lacks "$TEST_DIR/tmux.log" "kill-session" "kill-session must not be invoked when terminal pattern present"
 assert_file_lacks "$TEST_DIR/tmux.log" "new-session" "new-session must not be invoked when terminal pattern present"

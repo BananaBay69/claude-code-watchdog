@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude Code Watchdog — detects stuck sessions and restarts
+# Claude Code Watchdog, detects stuck sessions and restarts
 # https://github.com/BananaBay69/claude-code-watchdog
 
 set -euo pipefail
@@ -8,7 +8,7 @@ WATCHDOG_VERSION="0.1.7"
 
 # --- CLI flag parsing ---
 # parse_args() handles --help / --version / --show-config / --config <file>.
-# Called from main() — when sourced, args are not parsed.
+# Called from main(), when sourced, args are not parsed.
 
 SHOW_CONFIG=0
 CONFIG_FILE=""
@@ -20,7 +20,7 @@ parse_args() {
         case "$1" in
             -h|--help)
                 cat <<'USAGE'
-claude-watchdog — supervise a Claude Code tmux session and restart on stuck states
+claude-watchdog, supervise a Claude Code tmux session and restart on stuck states
 
 Usage:
     claude-watchdog.sh                    Run one supervisory check (launchd entrypoint)
@@ -190,7 +190,7 @@ start_claude() {
     log "ACTION: Starting new tmux session '$TMUX_SESSION'"
     # Pin session cwd to $HOME so Claude never inherits launchd's default `/`
     # (workspace `/` triggers a trust prompt that --dangerously-skip-permissions
-    # does not bypass in Claude Code v2.1.x, causing infinite restart loops — #10).
+    # does not bypass in Claude Code v2.1.x, causing infinite restart loops, #10).
     tmux new-session -d -s "$TMUX_SESSION" -c "$HOME" "$CLAUDE_CMD"
     date +%s > "$COOLDOWN_FILE"
     bump_restart_count
@@ -206,8 +206,8 @@ start_claude() {
 #
 # Unknown schemas or malformed content are treated as stale so that a
 # misbehaving writer still triggers the supervisor (fail loud, not silent).
-# "disabled" is reserved for "no signal available" — env unset or file
-# missing — where the supervisor falls back to grep-only detection.
+# "disabled" is reserved for "no signal available", env unset or file
+# missing, where the supervisor falls back to grep-only detection.
 heartbeat_state() {
     if [ -z "$HEARTBEAT_FILE" ]; then
         echo "disabled"
@@ -224,12 +224,12 @@ heartbeat_state() {
     # shellcheck disable=SC2162
     read schema hb_ts _rest < "$HEARTBEAT_FILE" 2>/dev/null || true
     if [ "$schema" != "1" ]; then
-        log "WARN: heartbeat unsupported schema '$schema' in $HEARTBEAT_FILE — treating as stale"
+        log "WARN: heartbeat unsupported schema '$schema' in $HEARTBEAT_FILE, treating as stale"
         echo "stale"
         return
     fi
     if ! [[ "$hb_ts" =~ ^[0-9]+$ ]]; then
-        log "WARN: heartbeat malformed timestamp '$hb_ts' in $HEARTBEAT_FILE — treating as stale"
+        log "WARN: heartbeat malformed timestamp '$hb_ts' in $HEARTBEAT_FILE, treating as stale"
         echo "stale"
         return
     fi
@@ -248,7 +248,7 @@ heartbeat_state() {
 # to determine whether the bot has produced an outbound reply within the
 # configured window.
 #
-# "disabled" reserved for "no signal available" — env unset or file missing —
+# "disabled" reserved for "no signal available", env unset or file missing,
 # in which case Case D is skipped (cannot determine silent-loop without
 # outbound signal).
 outbound_state() {
@@ -266,12 +266,12 @@ outbound_state() {
     # shellcheck disable=SC2162
     read schema ob_ts _rest < "$OUTBOUND_FILE" 2>/dev/null || true
     if [ "$schema" != "1" ]; then
-        log "WARN: outbound unsupported schema '$schema' in $OUTBOUND_FILE — treating as stale"
+        log "WARN: outbound unsupported schema '$schema' in $OUTBOUND_FILE, treating as stale"
         echo "stale"
         return
     fi
     if ! [[ "$ob_ts" =~ ^[0-9]+$ ]]; then
-        log "WARN: outbound malformed timestamp '$ob_ts' in $OUTBOUND_FILE — treating as stale"
+        log "WARN: outbound malformed timestamp '$ob_ts' in $OUTBOUND_FILE, treating as stale"
         echo "stale"
         return
     fi
@@ -337,8 +337,8 @@ detect_silent_loop() {
 #
 # Alert flag files live in $LOG_DIR alongside .watchdog-last-restart.
 # Naming:
-#   .watchdog-alert-sent-<key>           — state-based (deleted when state clears)
-#   .watchdog-alert-sent-<key>-YYYYMMDD  — time-based (rolls over at midnight)
+#   .watchdog-alert-sent-<key>          , state-based (deleted when state clears)
+#   .watchdog-alert-sent-<key>-YYYYMMDD , time-based (rolls over at midnight)
 # Caller decides which flavor by passing the bare key or the dated key.
 #
 # Callers must ensure $LOG_DIR exists before mark_alert_sent (e.g. via
@@ -430,7 +430,7 @@ attempt_restart() {
         if [ "$DAILY_RESTART_CAP" -gt 0 ] \
            && [ "$new_count" -ge "$DAILY_RESTART_CAP" ] \
            && ! alert_already_sent "cap-$(today_yyyymmdd)"; then
-            cap_msg="Daily restart cap reached ($DAILY_RESTART_CAP) — throttling cooldown to ${THROTTLED_COOLDOWN}s for the rest of the day. Watchdog will continue logging status. Recovery: claude-watchdog --reset (after fixing root cause), or wait for midnight rollover."
+            cap_msg="Daily restart cap reached ($DAILY_RESTART_CAP), throttling cooldown to ${THROTTLED_COOLDOWN}s for the rest of the day. Watchdog will continue logging status. Recovery: claude-watchdog --reset (after fixing root cause), or wait for midnight rollover."
             emit_alert cap-reached "$cap_msg"
             mark_alert_sent "cap-$(today_yyyymmdd)"
         fi
@@ -553,7 +553,7 @@ detect_restart_pattern() {
 
 # Echoes "yes:<matched_pattern>" or "no:" based on whether $1 (pane content)
 # matches any TERMINAL_PATTERNS entry. TERMINAL_PATTERNS indicate states
-# restart cannot recover from (e.g. logged out — needs interactive /login).
+# restart cannot recover from (e.g. logged out, needs interactive /login).
 # Result is consumed by main() to emit an alert without restarting.
 detect_terminal_state() {
     local pane="$1"
@@ -622,7 +622,7 @@ main() {
         init_config
     fi
 
-    # --reset and --status: operator inspection commands — exit before setup_logging
+    # --reset and --status: operator inspection commands, exit before setup_logging
     # so they don't trigger log rotation or any writes
     if [ "$DO_RESET" -eq 1 ]; then
         do_reset
@@ -668,7 +668,7 @@ EOF
         exit 0
     fi
 
-    # Case B: tmux session exists — check for stuck state using heartbeat
+    # Case B: tmux session exists, check for stuck state using heartbeat
     # (primary when enabled) and pane-scrape grep (cross-check / fallback).
     PANE_OUTPUT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -50)
 
@@ -687,7 +687,7 @@ EOF
     # originally orthogonal, but a pane that simultaneously shows a
     # restart pattern (rate-limit prompt, 401 error) and a terminal
     # pattern would emit "Restart cannot fix" and then immediately
-    # restart anyway — alert and behaviour contradicting each other
+    # restart anyway, alert and behaviour contradicting each other
     # (issue #25). When terminal state is present, the alert message is
     # the source of truth: stay silent on the restart path until the
     # user clears the symptom.
@@ -695,16 +695,16 @@ EOF
     if [ "${TERMINAL_MATCH%%:*}" = "yes" ]; then
         if ! alert_already_sent not-logged-in; then
             local terminal_msg
-            terminal_msg="Claude Code is not logged in (TUI shows: ${TERMINAL_MATCH#*:}). Restart cannot fix — needs interactive /login. Recovery: ssh into host, tmux attach -t $TMUX_SESSION, then run /login."
+            terminal_msg="Claude Code is not logged in (TUI shows: ${TERMINAL_MATCH#*:}). Restart cannot fix, needs interactive /login. Recovery: ssh into host, tmux attach -t $TMUX_SESSION, then run /login."
             emit_alert not-logged-in "$terminal_msg"
             mark_alert_sent not-logged-in
         else
-            log "INFO: terminal-state '${TERMINAL_MATCH#*:}' still present (alert already sent — silent until cleared)"
+            log "INFO: terminal-state '${TERMINAL_MATCH#*:}' still present (alert already sent, silent until cleared)"
         fi
         TERMINAL_LOCK=1
     else
         if alert_already_sent not-logged-in; then
-            log "INFO: terminal-state cleared — removing alert flag"
+            log "INFO: terminal-state cleared, removing alert flag"
             clear_alert_flag not-logged-in
         fi
         TERMINAL_LOCK=0
@@ -721,13 +721,13 @@ EOF
         stale:0)
             # v0.1.5: do NOT restart on heartbeat-stale-alone. Idle bots that
             # haven't received a UserPromptSubmit/Stop event in `WATCHDOG_HEARTBEAT_STALE_SECONDS`
-            # produce a stale heartbeat naturally — restarting them was a false
+            # produce a stale heartbeat naturally, restarting them was a false
             # positive. Fall through to Case C (process-alive check) which catches
             # the actually-stuck-without-pattern scenario.
-            log "INFO: heartbeat stale but pane clean — likely idle; deferring to process check"
+            log "INFO: heartbeat stale but pane clean, likely idle; deferring to process check"
             ;;
         fresh:1)
-            log "WARN: pane pattern '$MATCHED' matched but heartbeat fresh; restarting (grep authoritative — may be false positive from conversation content)"
+            log "WARN: pane pattern '$MATCHED' matched but heartbeat fresh; restarting (grep authoritative, may be false positive from conversation content)"
             SHOULD_RESTART=1
             ;;
         fresh:0)
@@ -742,7 +742,7 @@ EOF
             ;;
     esac
 
-    # Issue #25: terminal state already emitted "Restart cannot fix" — do
+    # Issue #25: terminal state already emitted "Restart cannot fix", do
     # not contradict it by restarting (matched-restart case) or by
     # restarting on a dead claude process (which won't recover from
     # not-logged-in either; the user has to /login interactively).
@@ -768,7 +768,7 @@ EOF
 
     # Case D: silent-loop (opt-in via WATCHDOG_SILENT_LOOP_ENABLED=1)
     # Distinguishes (a) genuinely idle bot from (b) bot consuming inputs but
-    # not producing outbound replies. Alert only — never restart (root cause
+    # not producing outbound replies. Alert only, never restart (root cause
     # is typically SKILL.md instruction-leak which restart cannot fix).
     INCOMING_COUNT=$(count_pane_incoming "$PANE_OUTPUT")
     OB_STATE=$(outbound_state)
@@ -780,11 +780,11 @@ EOF
             emit_alert silent-loop "$silent_msg"
             mark_alert_sent silent-loop
         else
-            log "INFO: silent-loop still present (${SILENT_RESULT#*:}, alert already sent — silent until cleared)"
+            log "INFO: silent-loop still present (${SILENT_RESULT#*:}, alert already sent, silent until cleared)"
         fi
     else
         if alert_already_sent silent-loop; then
-            log "INFO: silent-loop cleared (${SILENT_RESULT#*:}) — removing alert flag"
+            log "INFO: silent-loop cleared (${SILENT_RESULT#*:}), removing alert flag"
             clear_alert_flag silent-loop
         fi
         # Only log the no-detection state when enabled (avoid log spam when default-disabled)
